@@ -1,0 +1,64 @@
+name: CI
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Validate required structure
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          required=(
+            "project.godot"
+            "README.md"
+            "LICENSE"
+            "export_presets.cfg"
+            "scenes/main.tscn"
+            "scripts/main.gd"
+            "assets/ui"
+            "docs/architecture.md"
+            ".github/workflows/ci.yml"
+            ".github/ISSUE_TEMPLATE/feature.md"
+            ".github/ISSUE_TEMPLATE/bug.md"
+            ".github/ISSUE_TEMPLATE/epic.md"
+          )
+
+          for p in "${required[@]}"; do
+            if [ ! -e "$p" ]; then
+              echo "Missing required path: $p" >&2
+              exit 1
+            fi
+          done
+
+          echo "Structure OK"
+
+      - name: Headless Godot sanity check (placeholder)
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          GODOT_VERSION="4.2.2-stable"
+          ZIP="Godot_v${GODOT_VERSION}_linux.x86_64.zip"
+          URL="https://github.com/godotengine/godot-builds/releases/download/${GODOT_VERSION}/${ZIP}"
+
+          echo "Downloading: $URL"
+          curl -fsSL "$URL" -o godot.zip
+          unzip -q godot.zip
+
+          # The extracted binary is typically named like: Godot_vX.Y.Z-stable_linux.x86_64
+          GODOT_BIN=$(ls -1 Godot_v*_linux.x86_64 | head -n 1)
+          chmod +x "$GODOT_BIN"
+
+          ./$GODOT_BIN --headless --version
+          # Basic project open/quit. If the project is malformed, this should fail.
+          ./$GODOT_BIN --headless --quit --path .
