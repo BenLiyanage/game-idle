@@ -15,6 +15,10 @@ Phase 1 bootstrap for a minimal Godot 4.x project.
 
 You should see a centered label: **Hello Idle**.
 
+### Screenshot / snapshot
+
+While running, press **F12** to write a PNG screenshot to `user://snapshots/`.
+
 ## Export
 
 This repo includes a placeholder `export_presets.cfg` (no signing, no platform-specific setup yet).
