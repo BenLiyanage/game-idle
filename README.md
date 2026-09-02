@@ -1,15 +1,16 @@
 # game-idle
 
-Phase 1 bootstrap for a minimal Godot 4.x project.
+Phase 1 bootstrap for a minimal Godot 4.7.2-stable project.
 
 ## What this is
 
-- A barebones Godot 4.x project that boots to a single responsive UI screen showing **“Hello Idle”**.
+- A barebones Godot 4.7.2-stable project that boots to a single responsive UI screen showing **“Hello Idle”**.
 - No gameplay, economy, prestige, ads, analytics, or abstraction layers.
+- The project uses typed GDScript and the Compatibility renderer.
 
 ## Run locally
 
-1. Install **Godot 4.x**.
+1. Install **Godot 4.7.2-stable**.
 2. Open the project by selecting this folder in Godot (it contains `project.godot`).
 3. Press **Play**.
 
@@ -32,7 +33,7 @@ In Godot:
 
 GitHub Actions runs on pushes and pull requests to `main`:
 
-- Validates the required file/folder structure exists.
-- Attempts a lightweight headless Godot sanity check (downloads a Linux headless Godot binary on CI and runs it against the project).
+- Runs `bash tools/ci/verify.sh` as the canonical verification command.
+- Downloads the pinned Linux Godot 4.7.2-stable binary in CI before verification.
 
 See: `.github/workflows/ci.yml`

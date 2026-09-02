@@ -6,59 +6,53 @@ on:
   pull_request:
     branches: [ main ]
 
+env:
+  GODOT_VERSION: 4.7.2-stable
+
 jobs:
-  validate:
+  verify:
+    name: verify
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        # actions/checkout v4.2.2
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
 
-      - name: Validate required structure
+      - name: Install pinned Godot
         shell: bash
         run: |
           set -euo pipefail
 
-          required=(
-            "project.godot"
-            "README.md"
-            "LICENSE"
-            "export_presets.cfg"
-            "scenes/main.tscn"
-            "scripts/main.gd"
-            "assets/ui"
-            "docs/architecture.md"
-            ".github/workflows/ci.yml"
-            ".github/ISSUE_TEMPLATE/feature.md"
-            ".github/ISSUE_TEMPLATE/bug.md"
-            ".github/ISSUE_TEMPLATE/epic.md"
-          )
+          zip="Godot_v${GODOT_VERSION}_linux.x86_64.zip"
+          url="https://github.com/godotengine/godot-builds/releases/download/${GODOT_VERSION}/${zip}"
 
-          for p in "${required[@]}"; do
-            if [ ! -e "$p" ]; then
-              echo "Missing required path: $p" >&2
-              exit 1
-            fi
-          done
+          echo "Downloading ${url}"
+          curl -fsSL "$url" -o godot.zip
+          unzip -q godot.zip -d godot-bin
 
-          echo "Structure OK"
+          godot_path="$(find godot-bin -maxdepth 1 -type f -name 'Godot_v*_linux.x86_64' | head -n 1)"
+          if [[ -z "$godot_path" ]]; then
+            echo "Godot binary was not found after extraction" >&2
+            exit 1
+          fi
 
-      - name: Headless Godot sanity check (placeholder)
+          chmod +x "$godot_path"
+          echo "GODOT_BIN=$PWD/$godot_path" >> "$GITHUB_ENV"
+
+      - name: Verify
         shell: bash
         run: |
           set -euo pipefail
+          bash tools/ci/verify.sh
 
-          GODOT_VERSION="4.2.2-stable"
-          ZIP="Godot_v${GODOT_VERSION}_linux.x86_64.zip"
-          URL="https://github.com/godotengine/godot-builds/releases/download/${GODOT_VERSION}/${ZIP}"
-
-          echo "Downloading: $URL"
-          curl -fsSL "$URL" -o godot.zip
-          unzip -q godot.zip
-
-          # The extracted binary is typically named like: Godot_vX.Y.Z-stable_linux.x86_64
-          GODOT_BIN=$(ls -1 Godot_v*_linux.x86_64 | head -n 1)
-          chmod +x "$GODOT_BIN"
-
-          ./$GODOT_BIN --headless --version
-          # Basic project open/quit. If the project is malformed, this should fail.
-          ./$GODOT_BIN --headless --quit --path .
+      - name: Upload diagnostics
+        if: failure()
+        # actions/upload-artifact v4.6.2
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: verify-diagnostics
+          if-no-files-found: ignore
+          path: |
+            godot.zip
+            godot-bin/
+            ~/.local/share/godot/app_userdata/game-idle/logs/
