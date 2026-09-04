@@ -10,7 +10,6 @@ import sys
 import tempfile
 from pathlib import Path
 
-
 MODULE_PATH = Path(__file__).resolve().parents[2] / "tools" / "agent" / "run_issue.py"
 SPEC = importlib.util.spec_from_file_location("run_issue", MODULE_PATH)
 run_issue = importlib.util.module_from_spec(SPEC)
@@ -100,10 +99,14 @@ test -z "$failures"
         if os.environ.get("CODEX_AGENT_SECURITY_IMAGE"):
             env["CODEX_AGENT_WORKER_IMAGE"] = os.environ["CODEX_AGENT_SECURITY_IMAGE"]
         config = run_issue.load_isolation_config(repo_root, env)
-        command = run_issue.docker_run_command(config, layout, "codex-security-probe", None, ["sh", "/workspace/probe.sh"], env)
-        completed = subprocess.run(command, cwd=repo_root, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False)
+        command = run_issue.docker_run_command(
+            config, layout, "codex-security-probe", None, ["sh", "/workspace/probe.sh"], env
+        )
+        completed = subprocess.run(command, cwd=repo_root, text=True, capture_output=True, check=False)
         failures_path = result_dir / "probe-failures.txt"
-        failures = failures_path.read_text(encoding="utf-8").strip() if failures_path.exists() else "<missing failures file>"
+        failures = (
+            failures_path.read_text(encoding="utf-8").strip() if failures_path.exists() else "<missing failures file>"
+        )
         report = {
             "command": run_issue.command_line(command),
             "returncode": completed.returncode,
@@ -117,7 +120,12 @@ test -z "$failures"
         print(json.dumps(report, indent=2, sort_keys=True))
         if completed.returncode != 0:
             return 1
-        if failures or not report["workspace_write_survived"] or not report["result_artifact_survived"] or report["other_repo_mutated"]:
+        if (
+            failures
+            or not report["workspace_write_survived"]
+            or not report["result_artifact_survived"]
+            or report["other_repo_mutated"]
+        ):
             return 1
     return 0
 

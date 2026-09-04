@@ -1,15 +1,14 @@
 #!/usr/bin/env python3
 from __future__ import annotations
 
-import importlib.util
 import contextlib
+import importlib.util
 import io
 import json
 import sys
 import tempfile
 import unittest
 from pathlib import Path
-
 
 MODULE_PATH = Path(__file__).resolve().parents[2] / "tools" / "agent" / "run_issue.py"
 SPEC = importlib.util.spec_from_file_location("run_issue", MODULE_PATH)
@@ -30,12 +29,20 @@ class FakeRunner:
         self.verify_returncode = 0
         self.status_output = " M README.md\n"
 
-    def __call__(self, args: list[str], cwd: Path | None = None, input_text: str | None = None) -> run_issue.CommandResult:
+    def __call__(
+        self, args: list[str], cwd: Path | None = None, input_text: str | None = None
+    ) -> run_issue.CommandResult:
         self.calls.append(args)
         if args[:3] == ["git", "config", "--get"]:
             return run_issue.CommandResult(args, 0, "https://github.com/BenLiyanage/game-idle.git\n", "")
         if args[:3] == ["gh", "issue", "view"]:
-            payload = {"number": 8, "title": "Add a repository-owned local Codex issue worker", "body": "Body", "url": "https://github.com/BenLiyanage/game-idle/issues/8", "state": "OPEN"}
+            payload = {
+                "number": 8,
+                "title": "Add a repository-owned local Codex issue worker",
+                "body": "Body",
+                "url": "https://github.com/BenLiyanage/game-idle/issues/8",
+                "state": "OPEN",
+            }
             return run_issue.CommandResult(args, 0, json.dumps(payload), "")
         if args[:3] == ["git", "worktree", "list"]:
             return run_issue.CommandResult(args, 0, self.worktree_porcelain, "")
@@ -53,12 +60,27 @@ class FakeRunner:
         if args[:3] == ["git", "worktree", "add"]:
             return run_issue.CommandResult(args, 0, "", "")
         if args[:2] == ["docker", "run"]:
-            result_mount = next(part for index, part in enumerate(args) if index > 0 and args[index - 1] == "--mount" and "dst=/results" in part)
+            result_mount = next(
+                part
+                for index, part in enumerate(args)
+                if index > 0 and args[index - 1] == "--mount" and "dst=/results" in part
+            )
             result_dir = Path(result_mount.split("src=", 1)[1].split(",dst=", 1)[0])
             output_path = result_dir / "codex-result.json"
             output_path.parent.mkdir(parents=True, exist_ok=True)
-            output_path.write_text(json.dumps({"status": self.codex_status, "summary": "done", "blockers": ["needs decision"] if self.codex_status == "blocked" else []}), encoding="utf-8")
-            return run_issue.CommandResult(args, self.verify_returncode, "worker", "verification failed" if self.verify_returncode else "")
+            output_path.write_text(
+                json.dumps(
+                    {
+                        "status": self.codex_status,
+                        "summary": "done",
+                        "blockers": ["needs decision"] if self.codex_status == "blocked" else [],
+                    }
+                ),
+                encoding="utf-8",
+            )
+            return run_issue.CommandResult(
+                args, self.verify_returncode, "worker", "verification failed" if self.verify_returncode else ""
+            )
         if args[:3] == ["git", "status", "--porcelain"]:
             return run_issue.CommandResult(args, 0, self.status_output, "")
         if args[:2] in (["git", "add"], ["git", "commit"], ["git", "push"]):
@@ -111,10 +133,20 @@ class RunIssueTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             result_dir = Path(tmp) / "agent"
             result_dir.mkdir()
-            layout = run_issue.Layout(Path(tmp), Path(tmp) / ".worktrees", "agent/issue-8", Path(tmp), "main", result_dir, result_dir / "result.json")
+            layout = run_issue.Layout(
+                Path(tmp),
+                Path(tmp) / ".worktrees",
+                "agent/issue-8",
+                Path(tmp),
+                "main",
+                result_dir,
+                result_dir / "result.json",
+            )
             fake = FakeRunner()
             fake.prs = [{"number": 12, "url": "https://github.com/BenLiyanage/game-idle/pull/12"}]
-            url = run_issue.open_or_update_pr(run_issue.Issue(8, "Title", "Body", "url", "OPEN"), layout, "BenLiyanage/game-idle", "body", {}, fake)
+            url = run_issue.open_or_update_pr(
+                run_issue.Issue(8, "Title", "Body", "url", "OPEN"), layout, "BenLiyanage/game-idle", "body", {}, fake
+            )
         self.assertEqual(url, "https://github.com/BenLiyanage/game-idle/pull/12")
         self.assertTrue(any(call[:3] == ["gh", "pr", "edit"] for call in fake.calls))
         self.assertFalse(any(call[:3] == ["gh", "pr", "create"] for call in fake.calls))

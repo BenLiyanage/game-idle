@@ -11,10 +11,10 @@ import subprocess
 import sys
 import tempfile
 import uuid
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Callable, Iterable
-
+from typing import Any
 
 EXIT_SUCCESS = 0
 EXIT_BLOCKED = 10
@@ -96,8 +96,7 @@ def run_command(args: list[str], cwd: Path | None = None, input_text: str | None
         cwd=str(cwd) if cwd else None,
         input=input_text,
         text=True,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
+        capture_output=True,
         check=False,
     )
     return CommandResult(args, completed.returncode, completed.stdout, completed.stderr)
@@ -130,7 +129,11 @@ def parse_repo_from_remote(remote_url: str) -> str:
         match = re.match(pattern, remote_url)
         if match:
             return match.group(1)
-    raise WorkerError("infrastructure_failed", f"cannot determine GitHub repository from origin URL: {remote_url}", EXIT_INFRASTRUCTURE_FAILED)
+    raise WorkerError(
+        "infrastructure_failed",
+        f"cannot determine GitHub repository from origin URL: {remote_url}",
+        EXIT_INFRASTRUCTURE_FAILED,
+    )
 
 
 def github_repo(repo_root: Path, env: dict[str, str], command_runner: Callable[..., CommandResult]) -> str:
@@ -156,7 +159,9 @@ def build_layout(repo_root: Path, issue_number: int, env: dict[str, str]) -> Lay
     worktree_root = Path(env.get("CODEX_AGENT_WORKTREE_ROOT", repo_root / ".worktrees")).expanduser()
     worktree = worktree_root / safe_branch
     base_branch = env.get("CODEX_AGENT_BASE_BRANCH", DEFAULT_BASE_BRANCH)
-    result_dir = Path(env.get("CODEX_AGENT_RESULT_DIR", repo_root / ".codex-agent" / f"issue-{issue_number}")).expanduser()
+    result_dir = Path(
+        env.get("CODEX_AGENT_RESULT_DIR", repo_root / ".codex-agent" / f"issue-{issue_number}")
+    ).expanduser()
     result_path = Path(env.get("CODEX_AGENT_RESULT_PATH", result_dir / "result.json")).expanduser()
     return Layout(repo_root, worktree_root, branch, worktree, base_branch, result_dir, result_path)
 
@@ -166,19 +171,29 @@ def load_isolation_config(repo_root: Path, env: dict[str, str]) -> IsolationConf
     try:
         raw = json.loads(config_path.read_text(encoding="utf-8"))
     except OSError as exc:
-        raise WorkerError("infrastructure_failed", f"missing isolation config: {config_path}: {exc}", EXIT_INFRASTRUCTURE_FAILED)
+        raise WorkerError(
+            "infrastructure_failed", f"missing isolation config: {config_path}: {exc}", EXIT_INFRASTRUCTURE_FAILED
+        ) from exc
     except json.JSONDecodeError as exc:
-        raise WorkerError("infrastructure_failed", f"invalid isolation config JSON: {exc}", EXIT_INFRASTRUCTURE_FAILED)
+        raise WorkerError(
+            "infrastructure_failed", f"invalid isolation config JSON: {exc}", EXIT_INFRASTRUCTURE_FAILED
+        ) from exc
 
     docker = raw.get("docker")
     if not isinstance(docker, dict):
-        raise WorkerError("infrastructure_failed", "isolation config must contain a docker object", EXIT_INFRASTRUCTURE_FAILED)
+        raise WorkerError(
+            "infrastructure_failed", "isolation config must contain a docker object", EXIT_INFRASTRUCTURE_FAILED
+        )
 
     requested_network = str(env.get("CODEX_AGENT_WORKER_NETWORK", docker.get("network", DEFAULT_NETWORK_MODE)))
     default_network = str(docker.get("network", DEFAULT_NETWORK_MODE))
     explicit_network = "CODEX_AGENT_WORKER_NETWORK" in env
     if explicit_network and requested_network == "bridge" and env.get("CODEX_AGENT_ALLOW_WORKER_NETWORK") != "1":
-        raise WorkerError("infrastructure_failed", "bridge networking requires CODEX_AGENT_ALLOW_WORKER_NETWORK=1", EXIT_INFRASTRUCTURE_FAILED)
+        raise WorkerError(
+            "infrastructure_failed",
+            "bridge networking requires CODEX_AGENT_ALLOW_WORKER_NETWORK=1",
+            EXIT_INFRASTRUCTURE_FAILED,
+        )
 
     config = IsolationConfig(
         image=str(env.get("CODEX_AGENT_WORKER_IMAGE", docker.get("image", DEFAULT_WORKER_IMAGE))),
@@ -193,13 +208,18 @@ def load_isolation_config(repo_root: Path, env: dict[str, str]) -> IsolationConf
         no_new_privileges=bool(docker.get("no_new_privileges", True)),
         cap_drop=str(docker.get("cap_drop", "ALL")),
         security_opt=str(docker.get("security_opt", "no-new-privileges:true")),
-        tmpfs=tuple(str(item) for item in docker.get("tmpfs", ["/tmp:rw,nosuid,nodev,size=512m", "/run:rw,nosuid,nodev,size=64m"])),
+        tmpfs=tuple(
+            str(item)
+            for item in docker.get("tmpfs", ["/tmp:rw,nosuid,nodev,size=512m", "/run:rw,nosuid,nodev,size=64m"])
+        ),
     )
     validate_isolation_config(config, default_network, explicit_network)
     return config
 
 
-def validate_isolation_config(config: IsolationConfig, default_network: str | None = None, explicit_network: bool = False) -> None:
+def validate_isolation_config(
+    config: IsolationConfig, default_network: str | None = None, explicit_network: bool = False
+) -> None:
     problems: list[str] = []
     if not config.image:
         problems.append("worker image is required")
@@ -222,10 +242,16 @@ def validate_isolation_config(config: IsolationConfig, default_network: str | No
     if not config.cpus or not config.memory or not config.pids_limit:
         problems.append("CPU, memory, and PID limits are required")
     if problems:
-        raise WorkerError("infrastructure_failed", "isolation config failed closed: " + "; ".join(problems), EXIT_INFRASTRUCTURE_FAILED)
+        raise WorkerError(
+            "infrastructure_failed",
+            "isolation config failed closed: " + "; ".join(problems),
+            EXIT_INFRASTRUCTURE_FAILED,
+        )
 
 
-def fetch_issue(issue_number: int, repo: str, env: dict[str, str], command_runner: Callable[..., CommandResult]) -> Issue:
+def fetch_issue(
+    issue_number: int, repo: str, env: dict[str, str], command_runner: Callable[..., CommandResult]
+) -> Issue:
     gh = env.get("CODEX_AGENT_GH_BIN", "gh")
     result = require_success(
         command_runner(
@@ -238,7 +264,9 @@ def fetch_issue(issue_number: int, repo: str, env: dict[str, str], command_runne
     try:
         payload = json.loads(result.stdout)
     except json.JSONDecodeError as exc:
-        raise WorkerError("infrastructure_failed", f"gh returned invalid issue JSON: {exc}", EXIT_INFRASTRUCTURE_FAILED)
+        raise WorkerError(
+            "infrastructure_failed", f"gh returned invalid issue JSON: {exc}", EXIT_INFRASTRUCTURE_FAILED
+        ) from exc
     issue = Issue(
         number=int(payload["number"]),
         title=str(payload.get("title") or ""),
@@ -247,7 +275,9 @@ def fetch_issue(issue_number: int, repo: str, env: dict[str, str], command_runne
         state=str(payload.get("state") or ""),
     )
     if issue.state.upper() != "OPEN":
-        raise WorkerError("infrastructure_failed", f"issue #{issue_number} is not open: {issue.state}", EXIT_INFRASTRUCTURE_FAILED)
+        raise WorkerError(
+            "infrastructure_failed", f"issue #{issue_number} is not open: {issue.state}", EXIT_INFRASTRUCTURE_FAILED
+        )
     return issue
 
 
@@ -269,13 +299,17 @@ def worktrees(repo_root: Path, env: dict[str, str], command_runner: Callable[...
     return entries
 
 
-def branch_exists(repo_root: Path, branch: str, env: dict[str, str], command_runner: Callable[..., CommandResult]) -> bool:
+def branch_exists(
+    repo_root: Path, branch: str, env: dict[str, str], command_runner: Callable[..., CommandResult]
+) -> bool:
     git = env.get("CODEX_AGENT_GIT_BIN", "git")
     result = command_runner([git, "show-ref", "--verify", "--quiet", f"refs/heads/{branch}"], cwd=repo_root)
     return result.returncode == 0
 
 
-def remote_branch_exists(repo_root: Path, branch: str, env: dict[str, str], command_runner: Callable[..., CommandResult]) -> bool:
+def remote_branch_exists(
+    repo_root: Path, branch: str, env: dict[str, str], command_runner: Callable[..., CommandResult]
+) -> bool:
     git = env.get("CODEX_AGENT_GIT_BIN", "git")
     result = command_runner([git, "show-ref", "--verify", "--quiet", f"refs/remotes/origin/{branch}"], cwd=repo_root)
     return result.returncode == 0
@@ -295,7 +329,9 @@ def ensure_worktree(layout: Layout, env: dict[str, str], command_runner: Callabl
     if not branch_exists(layout.repo_root, layout.branch, env, command_runner):
         if remote_branch_exists(layout.repo_root, layout.branch, env, command_runner):
             require_success(
-                command_runner([git, "branch", "--track", layout.branch, f"origin/{layout.branch}"], cwd=layout.repo_root),
+                command_runner(
+                    [git, "branch", "--track", layout.branch, f"origin/{layout.branch}"], cwd=layout.repo_root
+                ),
                 "infrastructure_failed",
                 EXIT_INFRASTRUCTURE_FAILED,
                 f"tracking origin/{layout.branch}",
@@ -308,7 +344,11 @@ def ensure_worktree(layout: Layout, env: dict[str, str], command_runner: Callabl
                 f"creating branch {layout.branch}",
             )
     if layout.worktree.exists():
-        raise WorkerError("infrastructure_failed", f"worktree path already exists but is not registered: {layout.worktree}", EXIT_INFRASTRUCTURE_FAILED)
+        raise WorkerError(
+            "infrastructure_failed",
+            f"worktree path already exists but is not registered: {layout.worktree}",
+            EXIT_INFRASTRUCTURE_FAILED,
+        )
     require_success(
         command_runner([git, "worktree", "add", str(layout.worktree), layout.branch], cwd=layout.repo_root),
         "infrastructure_failed",
@@ -393,21 +433,29 @@ def read_codex_result(path: Path) -> dict[str, Any]:
     try:
         payload = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as exc:
-        raise WorkerError("implementation_failed", f"Codex did not produce valid result JSON: {exc}", EXIT_IMPLEMENTATION_FAILED)
+        raise WorkerError(
+            "implementation_failed", f"Codex did not produce valid result JSON: {exc}", EXIT_IMPLEMENTATION_FAILED
+        ) from exc
     status = payload.get("status")
     if status not in {"success", "blocked", "failure"}:
-        raise WorkerError("implementation_failed", f"Codex result has invalid status: {status}", EXIT_IMPLEMENTATION_FAILED)
+        raise WorkerError(
+            "implementation_failed", f"Codex result has invalid status: {status}", EXIT_IMPLEMENTATION_FAILED
+        )
     return payload
 
 
-def copy_minimal_codex_home(env: dict[str, str]) -> tuple[tempfile.TemporaryDirectory[str] | None, Path | None, list[str]]:
+def copy_minimal_codex_home(
+    env: dict[str, str],
+) -> tuple[tempfile.TemporaryDirectory[str] | None, Path | None, list[str]]:
     if env.get("CODEX_AGENT_SKIP_CODEX_AUTH") == "1":
         return None, None, []
 
     source = Path(env.get("CODEX_AGENT_CODEX_HOME_SOURCE", Path.home() / ".codex")).expanduser()
     auth = source / "auth.json"
     if not auth.exists():
-        raise WorkerError("infrastructure_failed", f"Codex auth file is required but missing: {auth}", EXIT_INFRASTRUCTURE_FAILED)
+        raise WorkerError(
+            "infrastructure_failed", f"Codex auth file is required but missing: {auth}", EXIT_INFRASTRUCTURE_FAILED
+        )
 
     temp_home = tempfile.TemporaryDirectory(prefix="codex-agent-home-")
     target = Path(temp_home.name)
@@ -447,7 +495,7 @@ prompt_path = "/results/prompt.md"
 code = run(codex, prompt_path)
 if code != 0:
     sys.exit(code)
-if {str(run_verify_after_codex)}:
+if {run_verify_after_codex!s}:
     sys.exit(run(json.loads({verify_json!r})))
 """
 
@@ -504,11 +552,19 @@ def validate_worker_paths(layout: Layout, codex_home: Path | None) -> None:
     result_dir = layout.result_dir.resolve()
     repo_root = layout.repo_root.resolve()
     if not str(worktree).startswith(str(layout.worktree_root.resolve())):
-        raise WorkerError("infrastructure_failed", f"worker worktree is outside configured worktree root: {worktree}", EXIT_INFRASTRUCTURE_FAILED)
+        raise WorkerError(
+            "infrastructure_failed",
+            f"worker worktree is outside configured worktree root: {worktree}",
+            EXIT_INFRASTRUCTURE_FAILED,
+        )
     if result_dir == repo_root or repo_root in result_dir.parents:
         pass
     elif not str(result_dir).startswith(str(Path(tempfile.gettempdir()).resolve())):
-        raise WorkerError("infrastructure_failed", f"result directory must be repository-local or temporary: {result_dir}", EXIT_INFRASTRUCTURE_FAILED)
+        raise WorkerError(
+            "infrastructure_failed",
+            f"result directory must be repository-local or temporary: {result_dir}",
+            EXIT_INFRASTRUCTURE_FAILED,
+        )
     forbidden = [
         Path.home(),
         Path.home() / ".ssh",
@@ -524,17 +580,32 @@ def validate_worker_paths(layout: Layout, codex_home: Path | None) -> None:
         for forbidden_path in forbidden:
             resolved_forbidden = forbidden_path.resolve()
             if path == resolved_forbidden:
-                raise WorkerError("infrastructure_failed", f"forbidden host path would be mounted: {path}", EXIT_INFRASTRUCTURE_FAILED)
+                raise WorkerError(
+                    "infrastructure_failed", f"forbidden host path would be mounted: {path}", EXIT_INFRASTRUCTURE_FAILED
+                )
             if resolved_forbidden != Path.home().resolve() and resolved_forbidden in path.parents:
-                raise WorkerError("infrastructure_failed", f"forbidden host path would be mounted: {path}", EXIT_INFRASTRUCTURE_FAILED)
+                raise WorkerError(
+                    "infrastructure_failed", f"forbidden host path would be mounted: {path}", EXIT_INFRASTRUCTURE_FAILED
+                )
 
 
 def enforce_docker_invariants(args: list[str], layout: Layout, codex_home: Path | None) -> None:
     rendered = "\n".join(args)
-    forbidden_tokens = {"--privileged", "--pid=host", "--network=host", "--cap-add", "/var/run/docker.sock", "/run/docker.sock"}
+    forbidden_tokens = {
+        "--privileged",
+        "--pid=host",
+        "--network=host",
+        "--cap-add",
+        "/var/run/docker.sock",
+        "/run/docker.sock",
+    }
     for token in forbidden_tokens:
         if token in args or token in rendered:
-            raise WorkerError("infrastructure_failed", f"forbidden Docker option or mount requested: {token}", EXIT_INFRASTRUCTURE_FAILED)
+            raise WorkerError(
+                "infrastructure_failed",
+                f"forbidden Docker option or mount requested: {token}",
+                EXIT_INFRASTRUCTURE_FAILED,
+            )
     required = [
         "--rm",
         "--network",
@@ -549,19 +620,33 @@ def enforce_docker_invariants(args: list[str], layout: Layout, codex_home: Path 
     ]
     missing = [item for item in required if item not in args]
     if missing:
-        raise WorkerError("infrastructure_failed", "Docker command missing required isolation options: " + ", ".join(missing), EXIT_INFRASTRUCTURE_FAILED)
+        raise WorkerError(
+            "infrastructure_failed",
+            "Docker command missing required isolation options: " + ", ".join(missing),
+            EXIT_INFRASTRUCTURE_FAILED,
+        )
     network_index = args.index("--network") + 1
     if args[network_index] not in {"none", "bridge"}:
-        raise WorkerError("infrastructure_failed", f"unexpected Docker network mode: {args[network_index]}", EXIT_INFRASTRUCTURE_FAILED)
-    writable_mounts = [arg for index, arg in enumerate(args) if index > 0 and args[index - 1] == "--mount" and arg.endswith(",rw")]
+        raise WorkerError(
+            "infrastructure_failed",
+            f"unexpected Docker network mode: {args[network_index]}",
+            EXIT_INFRASTRUCTURE_FAILED,
+        )
+    writable_mounts = [
+        arg for index, arg in enumerate(args) if index > 0 and args[index - 1] == "--mount" and arg.endswith(",rw")
+    ]
     expected_writable = {
         f"type=bind,src={layout.worktree},dst=/workspace,rw",
         f"type=bind,src={layout.result_dir},dst=/results,rw",
     }
     if set(writable_mounts) != expected_writable:
-        raise WorkerError("infrastructure_failed", f"unexpected writable host mounts: {writable_mounts}", EXIT_INFRASTRUCTURE_FAILED)
+        raise WorkerError(
+            "infrastructure_failed", f"unexpected writable host mounts: {writable_mounts}", EXIT_INFRASTRUCTURE_FAILED
+        )
     if codex_home is not None and f"type=bind,src={codex_home},dst=/codex-home,ro" not in args:
-        raise WorkerError("infrastructure_failed", "Codex credential home must be mounted read-only", EXIT_INFRASTRUCTURE_FAILED)
+        raise WorkerError(
+            "infrastructure_failed", "Codex credential home must be mounted read-only", EXIT_INFRASTRUCTURE_FAILED
+        )
 
 
 def run_isolated_worker(
@@ -583,15 +668,17 @@ def run_implementation_and_verification(
     env: dict[str, str],
     command_runner: Callable[..., CommandResult],
 ) -> tuple[dict[str, Any], CommandResult, list[str]]:
-    prompt_path = layout.result_dir / "prompt.md"
-    schema_path = layout.result_dir / "codex-result.schema.json"
     output_path = layout.result_dir / "codex-result.json"
-    codex_args = codex_command(Path("/results/prompt.md"), Path("/results/codex-result.schema.json"), Path("/results/codex-result.json"), env)
+    codex_args = codex_command(
+        Path("/results/prompt.md"), Path("/results/codex-result.schema.json"), Path("/results/codex-result.json"), env
+    )
     payload_path = layout.result_dir / "worker_payload.py"
     payload_path.write_text(worker_payload_script(codex_args, True), encoding="utf-8")
     temp_home, codex_home, exposed = copy_minimal_codex_home(env)
     try:
-        result = run_isolated_worker(layout, config, codex_home, ["python3", "/results/worker_payload.py"], env, command_runner)
+        result = run_isolated_worker(
+            layout, config, codex_home, ["python3", "/results/worker_payload.py"], env, command_runner
+        )
     finally:
         if temp_home is not None:
             temp_home.cleanup()
@@ -602,17 +689,25 @@ def run_implementation_and_verification(
             if parsed["status"] == "blocked":
                 raise WorkerError("blocked", parsed.get("summary", "Codex reported blocked"), EXIT_BLOCKED)
             if parsed["status"] == "success":
-                raise WorkerError("verification_failed", "repository verification failed inside isolated worker", EXIT_VERIFICATION_FAILED)
+                raise WorkerError(
+                    "verification_failed",
+                    "repository verification failed inside isolated worker",
+                    EXIT_VERIFICATION_FAILED,
+                )
         raise WorkerError("implementation_failed", message, EXIT_IMPLEMENTATION_FAILED)
     parsed = read_codex_result(output_path)
     if parsed["status"] == "blocked":
         raise WorkerError("blocked", parsed.get("summary", "Codex reported blocked"), EXIT_BLOCKED)
     if parsed["status"] == "failure":
-        raise WorkerError("implementation_failed", parsed.get("summary", "Codex reported failure"), EXIT_IMPLEMENTATION_FAILED)
+        raise WorkerError(
+            "implementation_failed", parsed.get("summary", "Codex reported failure"), EXIT_IMPLEMENTATION_FAILED
+        )
     return parsed, result, exposed
 
 
-def run_verification(worktree: Path, env: dict[str, str], command_runner: Callable[..., CommandResult]) -> CommandResult:
+def run_verification(
+    worktree: Path, env: dict[str, str], command_runner: Callable[..., CommandResult]
+) -> CommandResult:
     result = command_runner(["bash", "tools/ci/verify.sh"], cwd=worktree)
     if result.returncode != 0:
         raise WorkerError("verification_failed", "repository verification failed", EXIT_VERIFICATION_FAILED)
@@ -630,13 +725,24 @@ def git_has_changes(worktree: Path, env: dict[str, str], command_runner: Callabl
     return bool(result.stdout.strip())
 
 
-def commit_and_push(issue: Issue, layout: Layout, env: dict[str, str], command_runner: Callable[..., CommandResult]) -> None:
+def commit_and_push(
+    issue: Issue, layout: Layout, env: dict[str, str], command_runner: Callable[..., CommandResult]
+) -> None:
     git = env.get("CODEX_AGENT_GIT_BIN", "git")
     if not git_has_changes(layout.worktree, env, command_runner):
-        raise WorkerError("implementation_failed", "Codex completed but produced no committable changes", EXIT_IMPLEMENTATION_FAILED)
-    require_success(command_runner([git, "add", "-A"], cwd=layout.worktree), "infrastructure_failed", EXIT_INFRASTRUCTURE_FAILED, "staging changes")
+        raise WorkerError(
+            "implementation_failed", "Codex completed but produced no committable changes", EXIT_IMPLEMENTATION_FAILED
+        )
     require_success(
-        command_runner([git, "commit", "-m", f"Implement issue #{issue.number} disposable worker isolation"], cwd=layout.worktree),
+        command_runner([git, "add", "-A"], cwd=layout.worktree),
+        "infrastructure_failed",
+        EXIT_INFRASTRUCTURE_FAILED,
+        "staging changes",
+    )
+    require_success(
+        command_runner(
+            [git, "commit", "-m", f"Implement issue #{issue.number} disposable worker isolation"], cwd=layout.worktree
+        ),
         "infrastructure_failed",
         EXIT_INFRASTRUCTURE_FAILED,
         "committing changes",
@@ -654,14 +760,18 @@ def load_pr_template(repo_root: Path) -> str:
     return path.read_text(encoding="utf-8") if path.exists() else ""
 
 
-def pr_body(issue: Issue, codex_result: dict[str, Any], worker_result: CommandResult, template: str, evidence: dict[str, Any]) -> str:
+def pr_body(
+    issue: Issue, codex_result: dict[str, Any], worker_result: CommandResult, template: str, evidence: dict[str, Any]
+) -> str:
     body = template
     summary = codex_result.get("summary", "").strip()
     controls = json.dumps(evidence, indent=2, sort_keys=True)
     replacements = {
         "Closes #<issue>": f"Closes #{issue.number}",
         "## Scope Summary\n": f"## Scope Summary\n\n{summary}\n",
-        "```text\n```": "```text\ntools/agent/run_issue.sh " + str(issue.number) + "\npython3 -m unittest tests.agent.test_run_issue\npython3 tests/agent/security_probe.py\nbash tools/ci/verify.sh\n```",
+        "```text\n```": "```text\ntools/agent/run_issue.sh "
+        + str(issue.number)
+        + "\npython3 -m unittest tests.agent.test_run_issue\npython3 tests/agent/security_probe.py\nbash tools/ci/verify.sh\n```",
         "## Test Results\n": f"## Test Results\n\nWorker container exited {worker_result.returncode}. Canonical verification was invoked inside the isolated worker; see `.codex-agent/issue-{issue.number}/worker-output.txt` and local/CI logs for the exact Godot result.\n",
         "## Checks That Could Not Run\n": "## Checks That Could Not Run\n\nIf local Docker, Codex, or pinned Godot is unavailable, the failing command output is preserved as the real result instead of being bypassed.\n",
         "## Risks and Decisions\n": "## Risks and Decisions\n\nThe host launcher remains trusted and performs GitHub publishing. GitHub write credential separation is deferred to #36; runner trust redesign is deferred to #37.\n",
@@ -673,16 +783,39 @@ def pr_body(issue: Issue, codex_result: dict[str, Any], worker_result: CommandRe
     if "## Acceptance-Criteria Mapping\n\n- [ ]" in body:
         body = body.replace(
             "## Acceptance-Criteria Mapping\n\n- [ ]",
-            "## Acceptance-Criteria Mapping\n\n- [x] Trusted host launcher creates a fresh disposable worker container per issue run.\n- [x] Project/model-controlled implementation and canonical verification run inside the locked-down worker.\n- [x] Negative security probe attempts prohibited host access and asserts failure.\n- [x] Deliberate result artifacts survive worker teardown.\n\n## Isolation Evidence\n\n```json\n" + controls + "\n```",
+            "## Acceptance-Criteria Mapping\n\n- [x] Trusted host launcher creates a fresh disposable worker container per issue run.\n- [x] Project/model-controlled implementation and canonical verification run inside the locked-down worker.\n- [x] Negative security probe attempts prohibited host access and asserts failure.\n- [x] Deliberate result artifacts survive worker teardown.\n\n## Isolation Evidence\n\n```json\n"
+            + controls
+            + "\n```",
         )
     return body
 
 
-def open_or_update_pr(issue: Issue, layout: Layout, repo: str, body: str, env: dict[str, str], command_runner: Callable[..., CommandResult]) -> str:
+def open_or_update_pr(
+    issue: Issue,
+    layout: Layout,
+    repo: str,
+    body: str,
+    env: dict[str, str],
+    command_runner: Callable[..., CommandResult],
+) -> str:
     gh = env.get("CODEX_AGENT_GH_BIN", "gh")
     list_result = require_success(
         command_runner(
-            [gh, "pr", "list", "--repo", repo, "--head", layout.branch, "--base", layout.base_branch, "--state", "open", "--json", "number,url"]
+            [
+                gh,
+                "pr",
+                "list",
+                "--repo",
+                repo,
+                "--head",
+                layout.branch,
+                "--base",
+                layout.base_branch,
+                "--state",
+                "open",
+                "--json",
+                "number,url",
+            ]
         ),
         "infrastructure_failed",
         EXIT_INFRASTRUCTURE_FAILED,
@@ -691,11 +824,15 @@ def open_or_update_pr(issue: Issue, layout: Layout, repo: str, body: str, env: d
     try:
         prs = json.loads(list_result.stdout)
     except json.JSONDecodeError as exc:
-        raise WorkerError("infrastructure_failed", f"gh returned invalid PR JSON: {exc}", EXIT_INFRASTRUCTURE_FAILED)
+        raise WorkerError(
+            "infrastructure_failed", f"gh returned invalid PR JSON: {exc}", EXIT_INFRASTRUCTURE_FAILED
+        ) from exc
     body_path = layout.result_dir / "pr-body.md"
     body_path.write_text(body, encoding="utf-8")
     if len(prs) > 1:
-        raise WorkerError("infrastructure_failed", f"multiple open PRs found for {layout.branch}", EXIT_INFRASTRUCTURE_FAILED)
+        raise WorkerError(
+            "infrastructure_failed", f"multiple open PRs found for {layout.branch}", EXIT_INFRASTRUCTURE_FAILED
+        )
     if len(prs) == 1:
         number = str(prs[0]["number"])
         require_success(
@@ -740,13 +877,30 @@ def command_line(command: Iterable[str]) -> str:
     return " ".join(shlex.quote(part) for part in command)
 
 
-def evidence_payload(config: IsolationConfig, layout: Layout, docker_args: list[str], exposed_codex_files: list[str]) -> dict[str, Any]:
+def evidence_payload(
+    config: IsolationConfig, layout: Layout, docker_args: list[str], exposed_codex_files: list[str]
+) -> dict[str, Any]:
     return {
         "container_invocation": command_line(docker_args),
         "host_paths_mounted": [
-            {"path": str(layout.worktree), "container_path": "/workspace", "mode": "rw", "reason": "intended issue worktree"},
-            {"path": str(layout.result_dir), "container_path": "/results", "mode": "rw", "reason": "deliberate result/evidence artifacts"},
-            {"path": "ephemeral minimal Codex home", "container_path": "/codex-home", "mode": "ro", "reason": "Codex auth/config only"},
+            {
+                "path": str(layout.worktree),
+                "container_path": "/workspace",
+                "mode": "rw",
+                "reason": "intended issue worktree",
+            },
+            {
+                "path": str(layout.result_dir),
+                "container_path": "/results",
+                "mode": "rw",
+                "reason": "deliberate result/evidence artifacts",
+            },
+            {
+                "path": "ephemeral minimal Codex home",
+                "container_path": "/codex-home",
+                "mode": "ro",
+                "reason": "Codex auth/config only",
+            },
         ],
         "writable_paths": ["/workspace", "/results", "/tmp tmpfs", "/run tmpfs"],
         "user": f"{config.uid}:{config.gid}",
@@ -769,11 +923,27 @@ def evidence_payload(config: IsolationConfig, layout: Layout, docker_args: list[
     }
 
 
-def dry_run_payload(issue: Issue, layout: Layout, repo: str, env: dict[str, str], command_runner: Callable[..., CommandResult]) -> dict[str, Any]:
+def dry_run_payload(
+    issue: Issue, layout: Layout, repo: str, env: dict[str, str], command_runner: Callable[..., CommandResult]
+) -> dict[str, Any]:
     existing_worktrees = worktrees(layout.repo_root, env, command_runner)
     gh = env.get("CODEX_AGENT_GH_BIN", "gh")
     pr_result = command_runner(
-        [gh, "pr", "list", "--repo", repo, "--head", layout.branch, "--base", layout.base_branch, "--state", "open", "--json", "number,url"]
+        [
+            gh,
+            "pr",
+            "list",
+            "--repo",
+            repo,
+            "--head",
+            layout.branch,
+            "--base",
+            layout.base_branch,
+            "--state",
+            "open",
+            "--json",
+            "number,url",
+        ]
     )
     existing_prs: list[Any] = []
     if pr_result.returncode == 0 and pr_result.stdout.strip():
@@ -783,7 +953,14 @@ def dry_run_payload(issue: Issue, layout: Layout, repo: str, env: dict[str, str]
     schema_path = Path("/results/codex-result.schema.json")
     output_path = Path("/results/codex-result.json")
     container_name = f"codex-issue-{layout.branch.replace('/', '-')}-DRYRUN"
-    docker_args = docker_run_command(config, layout, container_name, Path("/tmp/codex-agent-home-dry-run"), ["python3", "/results/worker_payload.py"], env)
+    docker_args = docker_run_command(
+        config,
+        layout,
+        container_name,
+        Path("/tmp/codex-agent-home-dry-run"),
+        ["python3", "/results/worker_payload.py"],
+        env,
+    )
     return {
         "status": "dry_run",
         "issue": {"number": issue.number, "title": issue.title, "url": issue.url, "state": issue.state},
@@ -799,10 +976,20 @@ def dry_run_payload(issue: Issue, layout: Layout, repo: str, env: dict[str, str]
     }
 
 
-def main(argv: list[str] | None = None, command_runner: Callable[..., CommandResult] = run_command, env: dict[str, str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description="Run Codex against one explicit GitHub issue in a disposable worker container.")
+def main(
+    argv: list[str] | None = None,
+    command_runner: Callable[..., CommandResult] = run_command,
+    env: dict[str, str] | None = None,
+) -> int:
+    parser = argparse.ArgumentParser(
+        description="Run Codex against one explicit GitHub issue in a disposable worker container."
+    )
     parser.add_argument("issue_number", nargs="?")
-    parser.add_argument("--dry-run", action="store_true", help="resolve metadata and planned commands without invoking Codex or mutating GitHub")
+    parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="resolve metadata and planned commands without invoking Codex or mutating GitHub",
+    )
     args = parser.parse_args(argv)
     env = dict(os.environ if env is None else env)
     try:
@@ -819,21 +1006,49 @@ def main(argv: list[str] | None = None, command_runner: Callable[..., CommandRes
         layout.result_dir.mkdir(parents=True, exist_ok=True)
         config = load_isolation_config(repo_root, env)
         actual_worktree = ensure_worktree(layout, env, command_runner)
-        layout = Layout(layout.repo_root, layout.worktree_root, layout.branch, actual_worktree, layout.base_branch, layout.result_dir, layout.result_path)
+        layout = Layout(
+            layout.repo_root,
+            layout.worktree_root,
+            layout.branch,
+            actual_worktree,
+            layout.base_branch,
+            layout.result_dir,
+            layout.result_path,
+        )
         agents_text = (layout.worktree / "AGENTS.md").read_text(encoding="utf-8")
         prompt_path = layout.result_dir / "prompt.md"
         schema_path = layout.result_dir / "codex-result.schema.json"
         prompt = prompt_for_issue(issue, layout.worktree, agents_text)
         prompt_path.write_text(prompt, encoding="utf-8")
         write_schema(schema_path)
-        parsed_codex_result, worker_result, exposed = run_implementation_and_verification(layout, config, env, command_runner)
-        (layout.result_dir / "worker-output.txt").write_text(worker_result.stdout + worker_result.stderr, encoding="utf-8")
+        parsed_codex_result, worker_result, exposed = run_implementation_and_verification(
+            layout, config, env, command_runner
+        )
+        (layout.result_dir / "worker-output.txt").write_text(
+            worker_result.stdout + worker_result.stderr, encoding="utf-8"
+        )
         commit_and_push(issue, layout, env, command_runner)
-        dry_docker_args = docker_run_command(config, layout, f"codex-issue-{issue.number}-evidence", Path("/tmp/codex-agent-home-evidence"), ["python3", "/results/worker_payload.py"], env)
+        dry_docker_args = docker_run_command(
+            config,
+            layout,
+            f"codex-issue-{issue.number}-evidence",
+            Path("/tmp/codex-agent-home-evidence"),
+            ["python3", "/results/worker_payload.py"],
+            env,
+        )
         evidence = evidence_payload(config, layout, dry_docker_args, exposed)
         body = pr_body(issue, parsed_codex_result, worker_result, load_pr_template(layout.worktree), evidence)
         pr_url = open_or_update_pr(issue, layout, repo, body, env, command_runner)
-        write_result(layout.result_path, {"status": "success", "issue": issue.number, "branch": layout.branch, "worktree": str(layout.worktree), "pr": pr_url})
+        write_result(
+            layout.result_path,
+            {
+                "status": "success",
+                "issue": issue.number,
+                "branch": layout.branch,
+                "worktree": str(layout.worktree),
+                "pr": pr_url,
+            },
+        )
         return EXIT_SUCCESS
     except WorkerError as exc:
         issue = args.issue_number if args.issue_number else None
