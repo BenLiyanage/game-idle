@@ -9,6 +9,21 @@ EXPECTED_GODOT_VERSION="$(tr -d '[:space:]' < .godot-version)"
 echo "== structure =="
 bash tools/ci/check_repo_structure.sh
 
+echo "== python quality =="
+if ! python3 -m ruff --version >/tmp/game-idle-ruff-version.txt 2>/tmp/game-idle-ruff-version.err; then
+  echo "Ruff is unavailable. Install the pinned repository tool with: python3 -m pip install -r requirements-ruff.txt" >&2
+  cat /tmp/game-idle-ruff-version.err >&2
+  exit 1
+fi
+ruff_version="$(cat /tmp/game-idle-ruff-version.txt)"
+echo "found: $ruff_version"
+if [[ "$ruff_version" != "ruff 0.16.6" ]]; then
+  echo "Expected Ruff 0.16.6. Install the pinned repository tool with: python3 -m pip install -r requirements-ruff.txt" >&2
+  exit 1
+fi
+python3 -m ruff check .
+python3 -m ruff format --check .
+
 echo "== godot =="
 if [[ -n "${GODOT_BIN:-}" ]]; then
   if [[ ! -x "$GODOT_BIN" ]]; then
