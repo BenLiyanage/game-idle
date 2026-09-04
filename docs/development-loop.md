@@ -32,6 +32,36 @@ Deduplication markers:
 - `<!-- pm-grooming:v1 -->`
 - `<!-- codex-dispatch:v1 -->`
 
+## Main Branch Protection
+
+`main` is protected by the repository ruleset recorded at `.github/rulesets/main.json` and applied in GitHub repository settings as `Protect main`.
+
+The ruleset targets only `refs/heads/main` and enforces:
+
+- pull requests for normal changes to `main`;
+- one approving pull request review before merge, preserving Ben as the human merge approver for the initial secure unattended milestone;
+- the deterministic GitHub Actions status check `verify`, from the `CI` workflow and the GitHub Actions app (`integration_id` 15368), with strict branch freshness;
+- deletion protection for `main`;
+- non-fast-forward protection to prevent force pushes to `main`.
+
+The required `verify` check is repository-owned deterministic CI that runs `bash tools/ci/verify.sh`. LLM review, Codex review, Copilot review, or other stochastic model output must not be the sole deterministic status gate.
+
+This is a current-stage policy, not a permanent architecture decision. Future work for #44 may add a narrowly controlled automated merge path only through a separately reviewed policy change that retains required deterministic checks, fails closed on ambiguity, and does not let automation broaden its own authority.
+
+Recovery procedure:
+
+1. Prefer fixing broken code, tests, workflow configuration, or runner availability through a normal pull request.
+2. If `main` cannot be repaired through the protected path, Ben may temporarily edit or disable the `Protect main` ruleset in GitHub repository settings.
+3. Make the smallest recovery change needed, then immediately restore the ruleset to match `.github/rulesets/main.json`.
+4. Record the reason, commands or settings changed, and restoration result in the relevant issue or pull request.
+
+Manual verification in GitHub settings:
+
+- Repository settings -> Rules -> Rulesets contains an active repository ruleset named `Protect main`.
+- The ruleset target is Branch and includes `refs/heads/main`.
+- Rules include Require a pull request before merging, Require status checks to pass, Block force pushes, and Restrict deletions.
+- Required status checks contains only the deterministic `verify` check from GitHub Actions unless a later approved policy change adds another deterministic repo-owned check.
+
 ## Codex Cloud Readiness
 
 Connection status for this setup PR: Unable to determine.
