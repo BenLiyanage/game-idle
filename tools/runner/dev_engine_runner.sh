@@ -35,7 +35,7 @@ import sys
 from pathlib import Path
 
 try:
-    payload = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
+    payload = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8-sig"))
 except Exception:
     sys.exit(2)
 print(payload.get("agentName", ""))
@@ -52,7 +52,7 @@ import json
 import sys
 from pathlib import Path
 
-payload = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
+payload = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8-sig"))
 print(payload.get("gitHubUrl") or payload.get("serverUrl") or "")
 PY
 )"
@@ -74,7 +74,7 @@ case "$command" in
   status)
     service_status=0
     "$svc" status || service_status=$?
-    if command -v gh >/dev/null 2>&1 && [[ -n "${GH_TOKEN:-${GITHUB_TOKEN:-}}" ]]; then
+    if command -v gh >/dev/null 2>&1; then
       repo_slug="${expected_repo#https://github.com/}"
       gh api "repos/$repo_slug/actions/runners" \
         --jq ".runners[] | select(.name == \"$DEV_ENGINE_RUNNER_NAME\") | {name, status, busy, labels: [.labels[].name]}"
