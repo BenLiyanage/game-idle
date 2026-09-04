@@ -23,6 +23,20 @@ class RunnerConfig:
     repo_url: str
 
 
+@dataclass(frozen=True)
+class GitHubRunnerRecord:
+    name: str
+    status: str
+    busy: bool
+    labels: tuple[str, ...]
+
+
+@dataclass(frozen=True)
+class LocalServiceStatus:
+    exit_code: int
+    started: bool
+
+
 class RunnerControlError(Exception):
     def __init__(self, message: str, exit_code: int = EXIT_INFRASTRUCTURE_FAILED) -> None:
         super().__init__(message)
@@ -82,14 +96,84 @@ def run_service(service_script: Path, command: str, runner_dir: Path) -> int:
     return completed.returncode
 
 
+def local_service_status(service_script: Path, runner_dir: Path) -> LocalServiceStatus:
+    completed = subprocess.run(
+        [str(service_script), "status"],
+        cwd=runner_dir,
+        text=True,
+        check=False,
+        capture_output=True,
+    )
+    if completed.stdout:
+        print(completed.stdout, end="")
+    if completed.stderr:
+        print(completed.stderr, end="", file=sys.stderr)
+    started = "\nStarted:\n" in f"\n{completed.stdout}" and "\nStopped" not in f"\n{completed.stdout}"
+    return LocalServiceStatus(exit_code=completed.returncode, started=started)
+
+
+def runner_record_from_api_response(payload: str, runner_name: str) -> GitHubRunnerRecord | None:
+    try:
+        data = json.loads(payload)
+    except json.JSONDecodeError as exc:
+        raise RunnerControlError(f"cannot parse GitHub runner status response: {exc}") from exc
+    runners = data.get("runners") if isinstance(data, dict) else None
+    if not isinstance(runners, list):
+        raise RunnerControlError("GitHub runner status response did not include a runners list")
+
+    for runner in runners:
+        if not isinstance(runner, dict) or runner.get("name") != runner_name:
+            continue
+        labels = runner.get("labels", [])
+        label_names = tuple(
+            str(label.get("name")) for label in labels if isinstance(label, dict) and isinstance(label.get("name"), str)
+        )
+        return GitHubRunnerRecord(
+            name=runner_name,
+            status=str(runner.get("status") or ""),
+            busy=bool(runner.get("busy")),
+            labels=label_names,
+        )
+    return None
+
+
 def github_runner_status(config: RunnerConfig) -> int:
     if shutil.which("gh") is None:
-        print("GitHub runner availability was not checked because gh is unavailable.")
-        return 0
+        print("GitHub runner availability cannot be checked because gh is unavailable.", file=sys.stderr)
+        return EXIT_INFRASTRUCTURE_FAILED
     repo_slug = config.repo_url.removeprefix("https://github.com/")
-    jq = f'.runners[] | select(.name == "{config.runner_name}") | {{name, status, busy, labels: [.labels[].name]}}'
-    completed = subprocess.run(["gh", "api", f"repos/{repo_slug}/actions/runners", "--jq", jq], text=True, check=False)
-    return completed.returncode
+    completed = subprocess.run(
+        ["gh", "api", f"repos/{repo_slug}/actions/runners"],
+        text=True,
+        check=False,
+        capture_output=True,
+    )
+    if completed.returncode != 0:
+        detail = completed.stderr.strip() or completed.stdout.strip() or "unknown error"
+        print(f"GitHub runner availability check failed: {detail}", file=sys.stderr)
+        return EXIT_INFRASTRUCTURE_FAILED
+    try:
+        record = runner_record_from_api_response(completed.stdout, config.runner_name)
+    except RunnerControlError as exc:
+        print(exc.message, file=sys.stderr)
+        return exc.exit_code
+    if record is None:
+        print(
+            f"GitHub runner {config.runner_name!r} was not found in {repo_slug}; "
+            "the configured runner is not available.",
+            file=sys.stderr,
+        )
+        return EXIT_INFRASTRUCTURE_FAILED
+    labels = ", ".join(record.labels) if record.labels else "<none>"
+    if record.status != "online":
+        print(
+            f"GitHub runner {record.name!r} is {record.status or '<unknown>'} "
+            f"(busy={record.busy}, labels={labels}); the configured runner is not available.",
+            file=sys.stderr,
+        )
+        return EXIT_INFRASTRUCTURE_FAILED
+    print(f"GitHub runner {record.name!r} is online (busy={record.busy}, labels={labels}).")
+    return 0
 
 
 def control_runner(command: str, env: dict[str, str]) -> int:
@@ -97,9 +181,14 @@ def control_runner(command: str, env: dict[str, str]) -> int:
     service_script = validate_runner_identity(config)
     if command in {"start", "stop"}:
         return run_service(service_script, command, config.runner_dir)
-    service_status = run_service(service_script, "status", config.runner_dir)
+    service_status = local_service_status(service_script, config.runner_dir)
     github_status = github_runner_status(config)
-    return service_status or github_status
+    if service_status.exit_code != 0:
+        return service_status.exit_code
+    if not service_status.started:
+        print("Local GitHub runner service is not started; the configured runner is not available.", file=sys.stderr)
+        return EXIT_INFRASTRUCTURE_FAILED
+    return github_status
 
 
 def main(argv: list[str] | None = None, env: dict[str, str] | None = None) -> int:
