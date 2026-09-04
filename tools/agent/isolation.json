@@ -1,0 +1,20 @@
+{
+  "docker": {
+    "image": "game-idle-codex-worker:local",
+    "cpus": "2",
+    "memory": "4g",
+    "pids_limit": "256",
+    "network": "none",
+    "allow_bridge_network_when_explicit": true,
+    "uid": 1000,
+    "gid": 1000,
+    "readonly_rootfs": true,
+    "no_new_privileges": true,
+    "cap_drop": "ALL",
+    "security_opt": "no-new-privileges:true",
+    "tmpfs": [
+      "/tmp:rw,nosuid,nodev,size=512m",
+      "/run:rw,nosuid,nodev,size=64m"
+    ]
+  }
+}
