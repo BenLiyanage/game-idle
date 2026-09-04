@@ -39,6 +39,12 @@ jobs:
           chmod +x "$godot_path"
           echo "GODOT_BIN=$PWD/$godot_path" >> "$GITHUB_ENV"
 
+      - name: Install pinned Python tooling
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 -m pip install -r requirements-ruff.txt
+
       - name: Verify
         shell: bash
         run: |
