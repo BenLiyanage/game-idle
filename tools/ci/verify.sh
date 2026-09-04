@@ -17,8 +17,8 @@ if ! python3 -m ruff --version >/tmp/game-idle-ruff-version.txt 2>/tmp/game-idle
 fi
 ruff_version="$(cat /tmp/game-idle-ruff-version.txt)"
 echo "found: $ruff_version"
-if [[ "$ruff_version" != "ruff 0.16.6" ]]; then
-  echo "Expected Ruff 0.16.6. Install the pinned repository tool with: python3 -m pip install -r requirements-ruff.txt" >&2
+if [[ "$ruff_version" != "ruff 0.16.0" ]]; then
+  echo "Expected Ruff 0.16.0. Install the pinned repository tool with: python3 -m pip install -r requirements-ruff.txt" >&2
   exit 1
 fi
 python3 -m ruff check .
