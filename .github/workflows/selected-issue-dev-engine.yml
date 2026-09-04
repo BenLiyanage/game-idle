@@ -1,0 +1,67 @@
+name: Selected Issue Dev Engine
+
+on:
+  issues:
+    types: [labeled]
+
+permissions: {}
+
+concurrency:
+  group: dev-engine-issue-wip
+  cancel-in-progress: false
+
+jobs:
+  claim:
+    name: claim selected issue
+    if: github.event.label.name == 'selected-for-development'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      issues: write
+    outputs:
+      issue-number: ${{ steps.claim.outputs.issue_number }}
+      claimed: ${{ steps.claim.outputs.claimed }}
+    steps:
+      - name: Checkout trusted default branch
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: main
+          fetch-depth: 1
+
+      - name: Claim single WIP issue
+        id: claim
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ISSUE_NUMBER: ${{ github.event.issue.number }}
+          REPO: ${{ github.repository }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 tools/agent/claim_issue.py "$ISSUE_NUMBER" --repo "$REPO" --github-output "$GITHUB_OUTPUT"
+
+  implement:
+    name: host-native issue worker
+    needs: claim
+    if: needs.claim.outputs.claimed == 'true'
+    runs-on: [self-hosted, dev-engine]
+    timeout-minutes: 120
+    permissions:
+      contents: write
+      issues: read
+      pull-requests: write
+    steps:
+      - name: Checkout trusted default branch
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: main
+          fetch-depth: 0
+
+      - name: Run host-native Codex issue worker
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          GH_TOKEN: ${{ github.token }}
+          CODEX_AGENT_REPO: ${{ github.repository }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          tools/agent/run_issue.sh "${{ needs.claim.outputs.issue-number }}"

@@ -15,6 +15,7 @@ Work rules:
 - Run `bash tools/ci/verify.sh` before completing work.
 - Report commands, results, unavailable checks, and human verification steps.
 - Never merge a pull request.
+- Keep GitHub workflow YAML and shell wrappers thin; put non-trivial Dev Engine logic in linted/tested repository code, reuse canonical verification policy, maintain prompts/templates as repository artifacts, and preserve machine-readable lifecycle/result semantics such as `blocked`, capacity, validation, and infrastructure outcomes.
 
 Human approval is required before changing architecture, dependencies, save-data formats or migrations, renderer policy, platform SDKs, signing, releases, monetization, analytics, or significant performance trade-offs.
 
