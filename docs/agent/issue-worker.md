@@ -2,15 +2,18 @@
 
 `tools/agent/run_issue.sh <issue-number>` runs one explicitly selected GitHub issue through a local Codex implementation loop with a disposable worker boundary.
 
-The trusted host launcher owns GitHub issue lookup, worktree creation, Docker invocation, result collection, commit, push, and pull request creation. Code running inside the worker is untrusted. Model-generated and project-controlled commands run inside the worker container.
+The trusted host launcher owns GitHub issue lookup, worktree creation, Docker invocation, and result collection. Code running inside the worker is untrusted. Model-generated and project-controlled commands run inside the worker container.
+
+The default successful output is a deterministic change artifact. GitHub branch, commit, push, and pull request mutation are handled by the distinct trusted finalizer in `tools/agent/finalize_issue.sh`; see `docs/agent/trusted-finalizer.md`.
 
 The worker intentionally does not choose issues, inspect lifecycle labels, react to `issues:labeled` events, enforce WIP limits, increase WIP above one, or merge pull requests. Those orchestration concerns remain out of scope.
 
 ## Requirements
 
 - Host: macOS or Linux with `bash`, `python3`, `git`, `gh`, and Docker.
-- Host `gh` must be authenticated with permission to read issues, push branches, and create or edit pull requests in `BenLiyanage/game-idle`.
-- Host `git` must be able to fetch from and push to `origin`.
+- For worker runs, host `gh` only needs issue read access.
+- For finalizer runs, the trusted finalizer process needs narrow GitHub authority to push the expected issue branch and create or update the expected PR.
+- Host `git` must be able to fetch `origin` for worker runs. Push is only required by the trusted finalizer or the supervised compatibility publisher.
 - Worker image: `game-idle-codex-worker:local` by default, built from `tools/agent/Dockerfile`.
 - Worker image contents: `python3`, `bash`, `codex`, and any runtime dependencies required by `bash tools/ci/verify.sh`, including pinned Godot when full verification is expected to pass.
 
@@ -27,11 +30,15 @@ The Dockerfile uses the public `ghcr.io/openai/codex-universal:latest` developme
 ```bash
 tools/agent/run_issue.sh <issue-number>
 tools/agent/run_issue.sh <issue-number> --dry-run
+tools/agent/run_issue.sh <issue-number> --publish-local
+tools/agent/finalize_issue.sh <artifact> --repo BenLiyanage/game-idle --issue <issue-number> --base-branch main --base-sha <sha>
 ```
 
 The issue number is mandatory and must be a positive integer. The worker never scans or selects another issue.
 
 Dry-run mode resolves the issue and reports the planned branch, worktree, Codex command, Docker command, verification command, and existing PR reuse state. It does not invoke Codex, push, create a PR, edit a PR, or change labels.
+
+`--publish-local` is a supervised #8 compatibility path. It commits, pushes, and opens or updates a PR from the trusted host after artifact creation. Unattended operation must use `finalize_issue.sh` instead.
 
 ## Branch And Worktree Convention
 
@@ -41,7 +48,7 @@ By default, issue `123` uses:
 - Worktree: `.worktrees/agent-issue-123`
 - Result artifacts: `.codex-agent/issue-123/`
 
-The trusted host fetches `origin/main` and creates new issue branches from current `origin/main`. If the deterministic branch or worktree already exists, it is reused for explicit retries instead of creating duplicates. Existing failed work is preserved.
+The trusted host fetches `origin/main` and creates new issue worktrees from current `origin/main`. If the deterministic branch or worktree already exists, it is reused for explicit retries instead of creating duplicates. Existing failed work is preserved.
 
 ## Worker Boundary
 
@@ -99,7 +106,7 @@ The narrowest practical local mechanism found for the installed Codex CLI is `CO
 
 The copy is made into a temporary host directory, mounted read-only at `/codex-home`, and removed after the worker exits. Ben's general home directory and general-purpose credential stores are not mounted.
 
-Residual risk: Codex auth/config are readable by the Codex process and technically by project-controlled subprocesses running as the same non-root worker user. The launcher minimizes and makes this exposure explicit, but does not solve repository-write credential separation. That remains issue #36.
+Residual risk: Codex auth/config are readable by the Codex process and technically by project-controlled subprocesses running as the same non-root worker user. The launcher minimizes and makes this exposure explicit. Repository-write credentials are not mounted into the worker and are reserved for the trusted finalizer.
 
 ## Network Policy
 
@@ -161,24 +168,33 @@ The worker prints one JSON object and writes the same result to `CODEX_AGENT_RES
 
 Exit codes:
 
-- `0`: `success`; Codex completed, verification passed, branch was pushed, and one PR was created or updated.
+- `0`: `success`; Codex completed, verification passed in the disposable worker, and `change-artifact.json` was written. `pr` is `null` unless `--publish-local` was used.
 - `10`: `blocked`; Codex reported a protected product or architecture blocker.
 - `20`: `verification_failed`; canonical verification failed inside the isolated worker.
 - `30`: `implementation_failed`; Codex failed or did not produce committable work.
-- `40`: `infrastructure_failed`; local tools, authentication, Docker, network, branch/worktree, push, or PR operations failed.
+- `40`: `infrastructure_failed`; local tools, authentication, Docker, network, or branch/worktree operations failed. Push or PR failures only apply to `--publish-local`.
 - `64`: `usage_error`; the issue argument was missing or invalid.
 
 The caller should use this result instead of parsing Codex prose.
 
-## Pull Request Behavior
+The worker also writes `.codex-agent/issue-<issue-number>/change-artifact.json`, a schema-versioned JSON artifact containing repository, issue, base branch/SHA, branch identity, run identity, changed paths, a `git diff --binary` patch, and worker-side verification evidence. The trusted finalizer treats this artifact strictly as untrusted data.
 
-On success, the trusted host commits all worktree changes, pushes only the deterministic issue branch, and checks for an existing open PR from that branch to `main`. If one exists, it updates the body. If none exists, it creates one using the repository PR template and `Closes #<issue>`.
+## Trusted Finalizer
+
+`tools/agent/finalize_issue.sh` consumes `change-artifact.json`, validates it against caller-supplied expectations, creates a commit with Git plumbing from a temporary index, pushes the expected issue branch, and creates or updates exactly one PR.
+
+The finalizer does not invoke Codex, run Godot/tests, check out worker output, install dependencies, source shell code, or execute scripts from the proposed change. It preserves provenance in the resulting commit and PR body.
+
+See `docs/agent/trusted-finalizer.md` for the artifact schema, validation rules, idempotency behavior, credential design, and residual-risk documentation.
+
+## Supervised Compatibility Publisher
+
+When `--publish-local` is supplied, the trusted host commits all worktree changes, pushes only the deterministic issue branch, and checks for an existing open PR from that branch to `main`. If one exists, it updates the body. If none exists, it creates one using the repository PR template and `Closes #<issue>`.
 
 The worker never pushes to `main`, never force-pushes, and never merges.
 
 ## Deferred Protections
 
-- GitHub repository-write credential/finalizer separation remains #36.
 - GitHub Actions runner trust redesign remains #37.
 - Godot provisioning remains #33.
 - Multi-agent execution and WIP greater than one remain disabled.

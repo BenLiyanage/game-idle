@@ -29,6 +29,7 @@ class FakeRunner:
         self.codex_status = "success"
         self.verify_returncode = 0
         self.status_output = " M README.md\n"
+        self.base_sha = "a" * 40
 
     def __call__(self, args: list[str], cwd: Path | None = None, input_text: str | None = None) -> run_issue.CommandResult:
         self.calls.append(args)
@@ -47,6 +48,8 @@ class FakeRunner:
             return run_issue.CommandResult(args, 0, json.dumps(self.prs), "")
         if args[:3] == ["git", "fetch", "origin"]:
             return run_issue.CommandResult(args, 0, "", "")
+        if args[:2] == ["git", "rev-parse"]:
+            return run_issue.CommandResult(args, 0, f"{self.base_sha}\n", "")
         if args[:2] == ["git", "branch"]:
             self.branch_exists = True
             return run_issue.CommandResult(args, 0, "", "")
@@ -61,6 +64,10 @@ class FakeRunner:
             return run_issue.CommandResult(args, self.verify_returncode, "worker", "verification failed" if self.verify_returncode else "")
         if args[:3] == ["git", "status", "--porcelain"]:
             return run_issue.CommandResult(args, 0, self.status_output, "")
+        if args[:3] == ["git", "diff", "--name-only"]:
+            return run_issue.CommandResult(args, 0, "README.md\n", "")
+        if args[:3] == ["git", "diff", "--binary"]:
+            return run_issue.CommandResult(args, 0, "diff --git a/README.md b/README.md\n--- a/README.md\n+++ b/README.md\n@@ -1 +1 @@\n-old\n+new\n", "")
         if args[:2] in (["git", "add"], ["git", "commit"], ["git", "push"]):
             return run_issue.CommandResult(args, 0, "", "")
         if args[:3] == ["gh", "pr", "edit"]:
@@ -106,6 +113,58 @@ class RunIssueTests(unittest.TestCase):
         self.assertIn("--network none", result["docker_command"])
         self.assertIn("--read-only", result["docker_command"])
         self.assertIn("--cap-drop ALL", result["docker_command"])
+
+    def test_worker_environment_has_no_github_write_credentials(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            layout = run_issue.Layout(
+                repo_root=root,
+                worktree_root=root / ".worktrees",
+                branch="agent/issue-36",
+                worktree=root / ".worktrees" / "agent-issue-36",
+                base_branch="main",
+                result_dir=root / ".codex-agent" / "issue-36",
+                result_path=root / ".codex-agent" / "issue-36" / "result.json",
+            )
+            layout.worktree.mkdir(parents=True)
+            layout.result_dir.mkdir(parents=True)
+            env = {"GITHUB_TOKEN": "write-token-that-must-not-cross", "GH_TOKEN": "write-token-that-must-not-cross"}
+            command = run_issue.docker_run_command(
+                run_issue.IsolationConfig("image", "2", "4g", "256", "none", False, 1000, 1000, True, True, "ALL", "no-new-privileges:true", ()),
+                layout,
+                "container",
+                None,
+                ["python3", "/results/worker_payload.py"],
+                env,
+            )
+        rendered = run_issue.command_line(command)
+        self.assertNotIn("GITHUB_TOKEN", rendered)
+        self.assertNotIn("GH_TOKEN", rendered)
+        self.assertNotIn(".config/gh", rendered)
+        self.assertNotIn(".ssh", rendered)
+        self.assertNotIn(".git-credentials", rendered)
+
+    def test_worker_success_only_writes_artifact_without_github_mutation_by_default(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "AGENTS.md").write_text("Contract", encoding="utf-8")
+            env = {
+                "CODEX_AGENT_WORKTREE_ROOT": str(root.parent),
+                "CODEX_AGENT_RESULT_DIR": str(root / ".codex-agent"),
+                "CODEX_AGENT_RESULT_PATH": str(root / ".codex-agent" / "result.json"),
+                "CODEX_AGENT_SKIP_CODEX_AUTH": "1",
+            }
+            fake = FakeRunner()
+            fake.worktree_porcelain = f"worktree {root}\nHEAD abc\nbranch refs/heads/agent/issue-8\n"
+            with contextlib.redirect_stdout(io.StringIO()):
+                code = run_issue.main(["8"], command_runner=fake, env=env)
+            result = json.loads((root / ".codex-agent" / "result.json").read_text(encoding="utf-8"))
+            artifact_exists = (root / ".codex-agent" / "change-artifact.json").exists()
+        self.assertEqual(code, 0)
+        self.assertEqual(result["publisher_ran"], False)
+        self.assertTrue(artifact_exists)
+        self.assertFalse(any(call[:2] == ["git", "push"] for call in fake.calls))
+        self.assertFalse(any(call[:3] == ["gh", "pr", "create"] for call in fake.calls))
 
     def test_existing_pr_is_reused(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

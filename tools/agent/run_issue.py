@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import re
@@ -35,6 +36,8 @@ DEFAULT_WORKER_PIDS = "256"
 DEFAULT_WORKER_UID = 1000
 DEFAULT_WORKER_GID = 1000
 DEFAULT_NETWORK_MODE = "none"
+ARTIFACT_SCHEMA_VERSION = 1
+DEFAULT_FINALIZER_BIN = "tools/agent/finalize_issue.py"
 
 
 class WorkerError(Exception):
@@ -148,6 +151,16 @@ def github_repo(repo_root: Path, env: dict[str, str], command_runner: Callable[.
 def branch_for_issue(issue_number: int, env: dict[str, str]) -> str:
     prefix = env.get("CODEX_AGENT_BRANCH_PREFIX", DEFAULT_BRANCH_PREFIX)
     return f"{prefix}{issue_number}"
+
+
+def run_identity(issue_number: int, base_sha: str, env: dict[str, str]) -> str:
+    if env.get("CODEX_AGENT_RUN_ID"):
+        value = env["CODEX_AGENT_RUN_ID"]
+        if not re.fullmatch(r"[A-Za-z0-9_.:-]{1,128}", value):
+            raise WorkerError("usage_error", "CODEX_AGENT_RUN_ID contains unsupported characters", EXIT_USAGE)
+        return value
+    digest = hashlib.sha256(f"{issue_number}:{base_sha}".encode("utf-8")).hexdigest()[:16]
+    return f"issue-{issue_number}-{digest}"
 
 
 def build_layout(repo_root: Path, issue_number: int, env: dict[str, str]) -> Layout:
@@ -619,6 +632,81 @@ def run_verification(worktree: Path, env: dict[str, str], command_runner: Callab
     return result
 
 
+def git_output(args: list[str], cwd: Path, env: dict[str, str], command_runner: Callable[..., CommandResult], action: str) -> str:
+    git = env.get("CODEX_AGENT_GIT_BIN", "git")
+    result = require_success(
+        command_runner([git, *args], cwd=cwd),
+        "infrastructure_failed",
+        EXIT_INFRASTRUCTURE_FAILED,
+        action,
+    )
+    return result.stdout
+
+
+def base_sha(layout: Layout, env: dict[str, str], command_runner: Callable[..., CommandResult]) -> str:
+    return git_output(["rev-parse", f"origin/{layout.base_branch}^{{commit}}"], layout.repo_root, env, command_runner, "resolving base SHA").strip()
+
+
+def changed_paths(worktree: Path, env: dict[str, str], command_runner: Callable[..., CommandResult]) -> list[str]:
+    output = git_output(["diff", "--name-only", "--no-ext-diff"], worktree, env, command_runner, "listing changed paths")
+    return [line for line in output.splitlines() if line]
+
+
+def change_patch(worktree: Path, env: dict[str, str], command_runner: Callable[..., CommandResult]) -> str:
+    return git_output(["diff", "--binary", "--no-ext-diff"], worktree, env, command_runner, "creating change patch")
+
+
+def validate_changed_paths(paths: list[str]) -> None:
+    for path in paths:
+        if path.startswith("/") or path.startswith("../") or "/../" in path or path == "..":
+            raise WorkerError("implementation_failed", f"unsafe changed path in artifact: {path}", EXIT_IMPLEMENTATION_FAILED)
+        if path.startswith(".git/") or path == ".git":
+            raise WorkerError("implementation_failed", f"unsafe git metadata path in artifact: {path}", EXIT_IMPLEMENTATION_FAILED)
+
+
+def write_change_artifact(
+    issue: Issue,
+    layout: Layout,
+    repo: str,
+    resolved_base_sha: str,
+    parsed_codex_result: dict[str, Any],
+    worker_result: CommandResult,
+    evidence: dict[str, Any],
+    env: dict[str, str],
+    command_runner: Callable[..., CommandResult],
+) -> dict[str, Any]:
+    paths = changed_paths(layout.worktree, env, command_runner)
+    validate_changed_paths(paths)
+    patch_text = change_patch(layout.worktree, env, command_runner)
+    if not patch_text.strip():
+        raise WorkerError("implementation_failed", "Codex completed but produced no committable changes", EXIT_IMPLEMENTATION_FAILED)
+    artifact = {
+        "schema_version": ARTIFACT_SCHEMA_VERSION,
+        "repository": repo,
+        "issue": {"number": issue.number, "title": issue.title, "url": issue.url},
+        "base": {"branch": layout.base_branch, "sha": resolved_base_sha},
+        "branch": layout.branch,
+        "run": {"id": run_identity(issue.number, resolved_base_sha, env)},
+        "status": "success",
+        "change": {"format": "git-diff-binary", "changed_paths": paths, "patch": patch_text},
+        "verification": {
+            "trusted_finalizer_reran": False,
+            "command": "bash tools/ci/verify.sh",
+            "environment": "disposable untrusted worker",
+            "worker_exit_code": worker_result.returncode,
+            "codex_result": parsed_codex_result,
+        },
+        "provenance": {
+            "worker_contract": "tools/agent/run_issue.sh",
+            "result_artifacts": str(layout.result_dir),
+        },
+        "publisher": {"ran": False, "required": False},
+    }
+    artifact_path = layout.result_dir / "change-artifact.json"
+    write_result(artifact_path, artifact)
+    return artifact
+
+
 def git_has_changes(worktree: Path, env: dict[str, str], command_runner: Callable[..., CommandResult]) -> bool:
     git = env.get("CODEX_AGENT_GIT_BIN", "git")
     result = require_success(
@@ -803,6 +891,7 @@ def main(argv: list[str] | None = None, command_runner: Callable[..., CommandRes
     parser = argparse.ArgumentParser(description="Run Codex against one explicit GitHub issue in a disposable worker container.")
     parser.add_argument("issue_number", nargs="?")
     parser.add_argument("--dry-run", action="store_true", help="resolve metadata and planned commands without invoking Codex or mutating GitHub")
+    parser.add_argument("--publish-local", action="store_true", help="supervised compatibility path: commit, push, and create/update a PR from this trusted host")
     args = parser.parse_args(argv)
     env = dict(os.environ if env is None else env)
     try:
@@ -813,6 +902,7 @@ def main(argv: list[str] | None = None, command_runner: Callable[..., CommandRes
         issue = fetch_issue(issue_number, repo, env, command_runner)
         if args.dry_run:
             payload = dry_run_payload(issue, layout, repo, env, command_runner)
+            payload["publish_local"] = args.publish_local
             write_result(layout.result_path, payload)
             return EXIT_SUCCESS
 
@@ -820,6 +910,7 @@ def main(argv: list[str] | None = None, command_runner: Callable[..., CommandRes
         config = load_isolation_config(repo_root, env)
         actual_worktree = ensure_worktree(layout, env, command_runner)
         layout = Layout(layout.repo_root, layout.worktree_root, layout.branch, actual_worktree, layout.base_branch, layout.result_dir, layout.result_path)
+        resolved_base_sha = base_sha(layout, env, command_runner)
         agents_text = (layout.worktree / "AGENTS.md").read_text(encoding="utf-8")
         prompt_path = layout.result_dir / "prompt.md"
         schema_path = layout.result_dir / "codex-result.schema.json"
@@ -828,12 +919,29 @@ def main(argv: list[str] | None = None, command_runner: Callable[..., CommandRes
         write_schema(schema_path)
         parsed_codex_result, worker_result, exposed = run_implementation_and_verification(layout, config, env, command_runner)
         (layout.result_dir / "worker-output.txt").write_text(worker_result.stdout + worker_result.stderr, encoding="utf-8")
-        commit_and_push(issue, layout, env, command_runner)
         dry_docker_args = docker_run_command(config, layout, f"codex-issue-{issue.number}-evidence", Path("/tmp/codex-agent-home-evidence"), ["python3", "/results/worker_payload.py"], env)
         evidence = evidence_payload(config, layout, dry_docker_args, exposed)
-        body = pr_body(issue, parsed_codex_result, worker_result, load_pr_template(layout.worktree), evidence)
-        pr_url = open_or_update_pr(issue, layout, repo, body, env, command_runner)
-        write_result(layout.result_path, {"status": "success", "issue": issue.number, "branch": layout.branch, "worktree": str(layout.worktree), "pr": pr_url})
+        artifact = write_change_artifact(issue, layout, repo, resolved_base_sha, parsed_codex_result, worker_result, evidence, env, command_runner)
+        pr_url = None
+        if args.publish_local:
+            commit_and_push(issue, layout, env, command_runner)
+            body = pr_body(issue, parsed_codex_result, worker_result, load_pr_template(layout.worktree), evidence)
+            pr_url = open_or_update_pr(issue, layout, repo, body, env, command_runner)
+            artifact["publisher"] = {"ran": True, "required": False, "mode": "supervised_local", "pr": pr_url}
+            write_result(layout.result_dir / "change-artifact.json", artifact)
+        write_result(
+            layout.result_path,
+            {
+                "status": "success",
+                "issue": issue.number,
+                "branch": layout.branch,
+                "base_sha": resolved_base_sha,
+                "worktree": str(layout.worktree),
+                "artifact": str(layout.result_dir / "change-artifact.json"),
+                "pr": pr_url,
+                "publisher_ran": args.publish_local,
+            },
+        )
         return EXIT_SUCCESS
     except WorkerError as exc:
         issue = args.issue_number if args.issue_number else None
