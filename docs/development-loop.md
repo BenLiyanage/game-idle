@@ -39,14 +39,15 @@ Deduplication markers:
 The ruleset targets only `refs/heads/main` and enforces:
 
 - pull requests for normal changes to `main`;
-- one approving pull request review before merge, preserving Ben as the human merge approver for the initial secure unattended milestone;
 - the deterministic GitHub Actions status check `verify`, from the `CI` workflow and the GitHub Actions app (`integration_id` 15368), with strict branch freshness;
 - deletion protection for `main`;
 - non-fast-forward protection to prevent force pushes to `main`.
 
+For the current single-maintainer milestone, required approving pull request reviews are set to `0`. Ben explicitly performs the merge after reviewing the PR, and that merge action is the current human approval boundary. No separate approving review is required while the repository has no independent disposable, least-privilege reviewer or merger identity.
+
 The required `verify` check is repository-owned deterministic CI that runs `bash tools/ci/verify.sh`. LLM review, Codex review, Copilot review, or other stochastic model output must not be the sole deterministic status gate.
 
-This is a current-stage policy, not a permanent architecture decision. Future work for #44 may add a narrowly controlled automated merge path only through a separately reviewed policy change that retains required deterministic checks, fails closed on ambiguity, and does not let automation broaden its own authority.
+This is a current-stage policy, not a permanent architecture decision. Future reviewer/security work may revisit independent approval only after an appropriately isolated, least-privilege, revocable or disposable identity exists. Future work for #44 may add a narrowly controlled automated merge path only through a separately reviewed policy change that retains required deterministic checks, fails closed on ambiguity, and does not let automation broaden its own authority.
 
 Recovery procedure:
 
@@ -60,6 +61,7 @@ Manual verification in GitHub settings:
 - Repository settings -> Rules -> Rulesets contains an active repository ruleset named `Protect main`.
 - The ruleset target is Branch and includes `refs/heads/main`.
 - Rules include Require a pull request before merging, Require status checks to pass, Block force pushes, and Restrict deletions.
+- Required approving reviews is `0`.
 - Required status checks contains only the deterministic `verify` check from GitHub Actions unless a later approved policy change adds another deterministic repo-owned check.
 
 ## Codex Cloud Readiness
