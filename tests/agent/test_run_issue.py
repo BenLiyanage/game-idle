@@ -26,7 +26,10 @@ class FakeRunner:
         self.branch_exists = False
         self.remote_branch_exists = False
         self.prs: list[dict[str, object]] = []
-        self.validation_returncodes: list[int] = [0]
+        self.codex_statuses: list[str] = ["success"]
+        self.validation_results: list[run_issue.CommandResult] = [
+            run_issue.CommandResult(["bash", "tools/ci/verify.sh"], 0, "verification ok", "")
+        ]
         self.status_output = " M README.md\n"
 
     def __call__(
@@ -61,10 +64,23 @@ class FakeRunner:
         if args[:3] == ["git", "worktree", "add"]:
             return run_issue.CommandResult(args, 0, "", "")
         if args[:2] == ["codex", "exec"]:
+            output_path = Path(args[args.index("--output-last-message") + 1])
+            output_path.parent.mkdir(parents=True, exist_ok=True)
+            status = self.codex_statuses.pop(0)
+            output_path.write_text(
+                json.dumps(
+                    {
+                        "status": status,
+                        "summary": f"codex {status}",
+                        "blockers": ["needs protected decision"] if status == "blocked" else [],
+                    }
+                ),
+                encoding="utf-8",
+            )
             return run_issue.CommandResult(args, 0, "codex done", "")
-        if args[:2] == ["bash", "tools/agent/local_validate.sh"]:
-            returncode = self.validation_returncodes.pop(0)
-            return run_issue.CommandResult(args, returncode, "validation output", "")
+        if args[:2] == ["bash", "tools/ci/verify.sh"]:
+            result = self.validation_results.pop(0)
+            return run_issue.CommandResult(args, result.returncode, result.stdout, result.stderr)
         if args[:3] == ["git", "status", "--porcelain"]:
             return run_issue.CommandResult(args, 0, self.status_output, "")
         if args[:2] in (["git", "add"], ["git", "commit"], ["git", "push"]):
@@ -88,11 +104,12 @@ class RunIssueTests(unittest.TestCase):
         self.assertEqual(layout.branch, "agent/issue-8")
         self.assertTrue(str(layout.worktree).endswith(".worktrees/agent-issue-8"))
 
-    def test_prompt_includes_required_constraints(self) -> None:
+    def test_prompt_includes_required_constraints_from_template(self) -> None:
         issue = run_issue.Issue(8, "Title", "Body", "https://example.test/8", "OPEN")
         prompt = run_issue.prompt_for_issue(issue, Path("/tmp/wt"), "Contract")
         self.assertIn("Treat the selected GitHub issue above as the canonical implementation specification.", prompt)
         self.assertIn("Do not select, groom, prioritize, or implement any other issue.", prompt)
+        self.assertIn("Return JSON matching the provided schema", prompt)
         self.assertIn("Never merge", prompt)
         self.assertIn("Contract", prompt)
 
@@ -109,7 +126,7 @@ class RunIssueTests(unittest.TestCase):
         self.assertNotIn("docker run --rm", flattened)
         self.assertNotIn("gh pr create", flattened)
         self.assertIn("codex exec", result["codex_command"])
-        self.assertIn("tools/agent/local_validate.sh", result["validation_command"])
+        self.assertEqual(result["validation_command"], "bash tools/ci/verify.sh")
 
     def test_existing_pr_is_reused(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -144,15 +161,64 @@ class RunIssueTests(unittest.TestCase):
             }
             fake = FakeRunner()
             fake.worktree_porcelain = f"worktree {root}\nHEAD abc\nbranch refs/heads/agent/issue-8\n"
-            fake.validation_returncodes = [1, 0]
+            fake.codex_statuses = ["success", "success"]
+            fake.validation_results = [
+                run_issue.CommandResult(["bash", "tools/ci/verify.sh"], 1, "unit failure", ""),
+                run_issue.CommandResult(["bash", "tools/ci/verify.sh"], 0, "verification ok", ""),
+            ]
             with contextlib.redirect_stdout(io.StringIO()):
                 code = run_issue.main(["8"], command_runner=fake, env=env)
         self.assertEqual(code, run_issue.EXIT_SUCCESS)
         codex_calls = [call for call in fake.calls if call[:2] == ["codex", "exec"]]
-        validation_calls = [call for call in fake.calls if call[:2] == ["bash", "tools/agent/local_validate.sh"]]
+        validation_calls = [call for call in fake.calls if call[:2] == ["bash", "tools/ci/verify.sh"]]
         self.assertEqual(len(codex_calls), 2)
         self.assertEqual(len(validation_calls), 2)
         self.assertIn("local validation command for issue #8 failed", "\n".join(text or "" for text in fake.inputs))
+
+    def test_blocked_codex_result_has_distinct_exit_code(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "AGENTS.md").write_text("Contract", encoding="utf-8")
+            env = {
+                "CODEX_AGENT_WORKTREE_ROOT": str(root.parent),
+                "CODEX_AGENT_RESULT_DIR": str(root / ".codex-agent"),
+                "CODEX_AGENT_RESULT_PATH": str(root / ".codex-agent" / "result.json"),
+            }
+            fake = FakeRunner()
+            fake.worktree_porcelain = f"worktree {root}\nHEAD abc\nbranch refs/heads/agent/issue-8\n"
+            fake.codex_statuses = ["blocked"]
+            with contextlib.redirect_stdout(io.StringIO()):
+                code = run_issue.main(["8"], command_runner=fake, env=env)
+            result = json.loads((root / ".codex-agent" / "result.json").read_text(encoding="utf-8"))
+        self.assertEqual(code, run_issue.EXIT_BLOCKED)
+        self.assertEqual(result["status"], "blocked")
+        self.assertFalse(any(call[:2] == ["git", "commit"] for call in fake.calls))
+
+    def test_missing_local_godot_is_recorded_without_repair_loop(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "AGENTS.md").write_text("Contract", encoding="utf-8")
+            env = {
+                "CODEX_AGENT_WORKTREE_ROOT": str(root.parent),
+                "CODEX_AGENT_RESULT_DIR": str(root / ".codex-agent"),
+                "CODEX_AGENT_RESULT_PATH": str(root / ".codex-agent" / "result.json"),
+            }
+            fake = FakeRunner()
+            fake.worktree_porcelain = f"worktree {root}\nHEAD abc\nbranch refs/heads/agent/issue-8\n"
+            fake.validation_results = [
+                run_issue.CommandResult(
+                    ["bash", "tools/ci/verify.sh"],
+                    1,
+                    "== structure ==\nstructure ok\n== godot ==\n",
+                    "Godot is unavailable. Install Godot 4.7.2-stable or set GODOT_BIN.\n",
+                )
+            ]
+            with contextlib.redirect_stdout(io.StringIO()):
+                code = run_issue.main(["8"], command_runner=fake, env=env)
+            result = json.loads((root / ".codex-agent" / "result.json").read_text(encoding="utf-8"))
+        self.assertEqual(code, run_issue.EXIT_SUCCESS)
+        self.assertEqual(result["validation_status"], "cloud_only_prerequisite_missing")
+        self.assertEqual(len([call for call in fake.calls if call[:2] == ["codex", "exec"]]), 1)
 
     def test_validation_failure_after_retry_has_distinct_exit_code(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -165,7 +231,11 @@ class RunIssueTests(unittest.TestCase):
             }
             fake = FakeRunner()
             fake.worktree_porcelain = f"worktree {root}\nHEAD abc\nbranch refs/heads/agent/issue-8\n"
-            fake.validation_returncodes = [1, 1]
+            fake.codex_statuses = ["success", "success"]
+            fake.validation_results = [
+                run_issue.CommandResult(["bash", "tools/ci/verify.sh"], 1, "unit failure", ""),
+                run_issue.CommandResult(["bash", "tools/ci/verify.sh"], 1, "unit failure", ""),
+            ]
             with contextlib.redirect_stdout(io.StringIO()):
                 code = run_issue.main(["8"], command_runner=fake, env=env)
         self.assertEqual(code, run_issue.EXIT_VALIDATION_FAILED)

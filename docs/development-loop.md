@@ -24,7 +24,7 @@ Only one lifecycle label should be present on an issue at a time. If the GitHub 
 4. The workflow moves the selected issue to `in-progress` and queues one laptop job for the repository-scoped self-hosted runner labeled `dev-engine`.
 5. Ben may start or stop the supervised runner window through `tools/runner/dev_engine_runner.sh start|stop|status` from the existing host Codex installation, including through Codex Remote.
 6. The laptop runner invokes `tools/agent/run_issue.sh <issue-number>`, which runs the existing authenticated host Codex installation in a deterministic issue worktree.
-7. Codex gets a bounded local validation/fix opportunity before the worker commits, pushes, and creates or reuses one pull request.
+7. Codex gets a bounded `bash tools/ci/verify.sh` feedback/fix opportunity before the worker commits, pushes, and creates or reuses one pull request.
 8. PR automation moves the issue from `in-progress` to `in-review`.
 9. CI runs `bash tools/ci/verify.sh`; automatic Codex review may supplement CI but does not replace it.
 10. Ben reviews the PR and decides whether to merge.
@@ -95,4 +95,4 @@ Manual setup and test procedure:
 
 ## Verification
 
-CI is the authoritative full verification environment. Local agents must run `bash tools/ci/verify.sh` before completing work. If Godot is missing locally, full verification must fail clearly instead of being reported as a successful skip.
+CI is the authoritative full verification environment. Local agents must run the same canonical `bash tools/ci/verify.sh` before completing work; they must not copy its checks into a parallel local policy. If a device prerequisite is missing, report the environment gap and fix the device setup when the host is expected to run that check.

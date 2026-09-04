@@ -4,10 +4,7 @@ on:
   issues:
     types: [labeled]
 
-permissions:
-  contents: write
-  issues: write
-  pull-requests: write
+permissions: {}
 
 concurrency:
   group: dev-engine-issue-wip
@@ -18,10 +15,19 @@ jobs:
     name: claim selected issue
     if: github.event.label.name == 'selected-for-development'
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      issues: write
     outputs:
       issue-number: ${{ steps.claim.outputs.issue_number }}
       claimed: ${{ steps.claim.outputs.claimed }}
     steps:
+      - name: Checkout trusted default branch
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: main
+          fetch-depth: 1
+
       - name: Claim single WIP issue
         id: claim
         env:
@@ -31,29 +37,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-
-          issue_json="$(gh issue view "$ISSUE_NUMBER" --repo "$REPO" --json number,state,labels)"
-          state="$(jq -r '.state' <<<"$issue_json")"
-          has_selected="$(jq -r '[.labels[].name] | index("selected-for-development") != null' <<<"$issue_json")"
-          if [[ "$state" != "OPEN" || "$has_selected" != "true" ]]; then
-            echo "claimed=false" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
-
-          other_wip="$(
-            gh issue list --repo "$REPO" --state open --label in-progress --json number --jq '.[].number' |
-              awk -v selected="$ISSUE_NUMBER" '$1 != selected { count += 1 } END { print count + 0 }'
-          )"
-          if [[ "$other_wip" != "0" ]]; then
-            gh issue comment "$ISSUE_NUMBER" --repo "$REPO" --body "Dev Engine did not claim this issue because another issue is already labeled in-progress."
-            echo "claimed=false" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
-
-          gh issue comment "$ISSUE_NUMBER" --repo "$REPO" --body "<!-- dev-engine-claim:v1 -->Dev Engine claimed this issue for the supervised host-native runner."
-          gh issue edit "$ISSUE_NUMBER" --repo "$REPO" --remove-label selected-for-development --add-label in-progress
-          echo "issue_number=$ISSUE_NUMBER" >> "$GITHUB_OUTPUT"
-          echo "claimed=true" >> "$GITHUB_OUTPUT"
+          python3 tools/agent/claim_issue.py "$ISSUE_NUMBER" --repo "$REPO" --github-output "$GITHUB_OUTPUT"
 
   implement:
     name: host-native issue worker
@@ -61,6 +45,10 @@ jobs:
     if: needs.claim.outputs.claimed == 'true'
     runs-on: [self-hosted, dev-engine]
     timeout-minutes: 120
+    permissions:
+      contents: write
+      issues: read
+      pull-requests: write
     steps:
       - name: Checkout trusted default branch
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683

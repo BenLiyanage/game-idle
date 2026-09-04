@@ -48,21 +48,26 @@ Optional environment variables:
 - `CODEX_AGENT_SANDBOX`: sandbox override, default `workspace-write`.
 - `CODEX_AGENT_APPROVAL_POLICY`: approval policy, default `never`.
 - `CODEX_AGENT_MAX_REPAIR_ATTEMPTS`: bounded local validation repair attempts, default `1`, maximum `3`.
-- `CODEX_AGENT_VALIDATION_COMMAND`: local validation command override.
 
 The worker rejects obvious npm/container Codex binary paths. The future isolated container runtime remains separate work.
 
-## Local Validation And Repair
+## Verification And Repair
 
-The default local validation command is:
+The default validation command is the same canonical command used by GitHub-hosted CI:
 
 ```bash
-bash tools/agent/local_validate.sh
+bash tools/ci/verify.sh
 ```
 
-That script runs repository structure checks and Python unit tests. If Ruff is installed locally, it also runs Ruff. If Godot is available locally, it runs full `bash tools/ci/verify.sh`; otherwise it records that pinned Godot verification is left to GitHub-hosted CI.
+The local and remote policy must not drift. Device setup may differ, but the checked behavior should come from `tools/ci/verify.sh`, not a parallel copy of structure, Ruff, Python, or Godot checks.
 
-When local validation fails, the worker returns the failure output to Codex for a bounded repair attempt before publishing. It does not retry indefinitely.
+When canonical verification fails for implementation reasons, the worker returns the failure output to Codex for a bounded repair attempt before publishing. It does not retry indefinitely.
+
+If a host is missing a device prerequisite such as Godot, the worker records that incomplete local evidence distinctly instead of claiming the check passed. The development laptop for this runner path has Godot `4.7.2-stable` installed locally at:
+
+```text
+/Users/benliyanage/.local/bin/godot
+```
 
 ## Pull Request Behavior
 
@@ -76,9 +81,9 @@ The worker prints one JSON object and writes the same result to `CODEX_AGENT_RES
 
 Exit codes:
 
-- `0`: `success`; Codex completed, local validation passed, branch was pushed, and one PR was created or updated.
+- `0`: `success`; Codex completed, canonical verification passed locally or recorded a distinct missing-device-prerequisite status, branch was pushed, and one PR was created or updated.
 - `10`: `blocked`; reserved for protected product or architecture blockers reported by Codex.
-- `20`: `validation_failed`; local validation failed after the bounded repair opportunity.
+- `20`: `validation_failed`; canonical verification failed after the bounded repair opportunity.
 - `30`: `implementation_failed`; Codex failed or did not produce committable work.
 - `40`: `infrastructure_failed`; local tools, authentication, branch/worktree, push, or PR operations failed.
 - `50`: `capacity`; Codex reported capacity exhaustion.
@@ -112,8 +117,9 @@ Runner registration needs a short-lived GitHub runner registration token and mus
 3. Use a dedicated runner name such as `game-idle-dev-engine`.
 4. Add the dedicated label `dev-engine`.
 5. Install the service with GitHub's supported runner service command from that runner directory.
-6. Export or configure `DEV_ENGINE_RUNNER_DIR` and `DEV_ENGINE_RUNNER_NAME` for host Codex/Codex Remote.
-7. Verify:
+6. Install pinned Godot locally or set `GODOT_BIN` so `bash tools/ci/verify.sh` is runnable on the laptop.
+7. Export or configure `DEV_ENGINE_RUNNER_DIR` and `DEV_ENGINE_RUNNER_NAME` for host Codex/Codex Remote.
+8. Verify:
 
 ```bash
 tools/runner/dev_engine_runner.sh status

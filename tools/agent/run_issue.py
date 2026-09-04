@@ -27,6 +27,16 @@ DEFAULT_SANDBOX = "workspace-write"
 DEFAULT_APPROVAL_POLICY = "never"
 DEFAULT_REASONING_CONFIG_KEY = "model_reasoning_effort"
 DEFAULT_MAX_REPAIR_ATTEMPTS = 1
+CODEX_RESULT_SCHEMA = {
+    "type": "object",
+    "additionalProperties": False,
+    "required": ["status", "summary", "blockers"],
+    "properties": {
+        "status": {"type": "string", "enum": ["success", "blocked", "failure"]},
+        "summary": {"type": "string"},
+        "blockers": {"type": "array", "items": {"type": "string"}},
+    },
+}
 
 
 class WorkerError(Exception):
@@ -63,6 +73,18 @@ class Layout:
     base_branch: str
     result_dir: Path
     result_path: Path
+
+
+@dataclass(frozen=True)
+class CodexAttempt:
+    command: CommandResult
+    result: dict[str, Any]
+
+
+@dataclass(frozen=True)
+class ValidationSummary:
+    status: str
+    attempts: list[CommandResult]
 
 
 def run_command(args: list[str], cwd: Path | None = None, input_text: str | None = None) -> CommandResult:
@@ -272,6 +294,8 @@ def codex_command(output_path: Path, env: dict[str, str]) -> list[str]:
         env.get("CODEX_AGENT_SANDBOX", DEFAULT_SANDBOX),
         "--ask-for-approval",
         env.get("CODEX_AGENT_APPROVAL_POLICY", DEFAULT_APPROVAL_POLICY),
+        "--output-schema",
+        str(output_path.with_suffix(".schema.json")),
         "--output-last-message",
         str(output_path),
     ]
@@ -284,55 +308,71 @@ def codex_command(output_path: Path, env: dict[str, str]) -> list[str]:
     return command
 
 
-def prompt_for_issue(issue: Issue, worktree: Path, agents_text: str) -> str:
-    return f"""Work issue #{issue.number} in this repository worktree:
-{worktree}
-
-Issue URL:
-{issue.url}
-
-Issue title:
-{issue.title}
-
-Issue body:
-{issue.body}
-
-Repository contract from AGENTS.md:
-{agents_text}
-
-Task contract:
-- Read and obey AGENTS.md before changing files.
-- Treat the selected GitHub issue above as the canonical implementation specification.
-- Preserve the issue scope and acceptance criteria.
-- Stop on protected or blocking product/architecture decisions under AGENTS.md.
-- Do not select, groom, prioritize, or implement any other issue.
-- Run locally available validation before claiming success.
-- Use failures from local validation as feedback and fix your own work.
-- Produce one coherent pull-request worth of work.
-- Never merge a pull request.
-
-Final response contract:
-End with a concise implementation summary, exact local checks run, and any cloud-only checks intentionally left for GitHub-hosted CI.
-"""
+def render_template(path: Path, values: dict[str, object]) -> str:
+    text = path.read_text(encoding="utf-8")
+    for key, value in values.items():
+        text = text.replace("{{ " + key + " }}", str(value))
+    unreplaced = re.findall(r"{{\s*[-_a-zA-Z0-9]+\s*}}", text)
+    if unreplaced:
+        raise WorkerError(
+            "infrastructure_failed",
+            "prompt template has unresolved placeholders: " + ", ".join(sorted(set(unreplaced))),
+            EXIT_INFRASTRUCTURE_FAILED,
+        )
+    return text
 
 
-def repair_prompt(issue: Issue, validation_result: CommandResult) -> str:
+def prompt_templates(repo_root: Path) -> tuple[Path, Path]:
+    prompt_dir = repo_root / "tools" / "agent" / "prompts"
+    return prompt_dir / "implementation.md", prompt_dir / "repair.md"
+
+
+def prompt_for_issue(issue: Issue, worktree: Path, agents_text: str, repo_root: Path | None = None) -> str:
+    implementation_template, _ = prompt_templates(repo_root or repo_root_from_script())
+    return render_template(
+        implementation_template,
+        {
+            "issue_number": issue.number,
+            "worktree": worktree,
+            "issue_url": issue.url,
+            "issue_title": issue.title,
+            "issue_body": issue.body,
+            "agents_text": agents_text,
+        },
+    )
+
+
+def repair_prompt(issue: Issue, validation_result: CommandResult, repo_root: Path | None = None) -> str:
     output = (validation_result.stdout + validation_result.stderr).strip()
-    return f"""The local validation command for issue #{issue.number} failed.
+    _, repair_template = prompt_templates(repo_root or repo_root_from_script())
+    return render_template(
+        repair_template,
+        {
+            "issue_number": issue.number,
+            "validation_command": command_line(validation_result.args),
+            "validation_exit_code": validation_result.returncode,
+            "validation_output": output[-12000:],
+        },
+    )
 
-Command:
-{command_line(validation_result.args)}
 
-Exit code:
-{validation_result.returncode}
+def write_schema(path: Path) -> None:
+    path.write_text(json.dumps(CODEX_RESULT_SCHEMA, indent=2, sort_keys=True) + "\n", encoding="utf-8")
 
-Output:
-```text
-{output[-12000:]}
-```
 
-Fix only the implementation for issue #{issue.number}. Re-run the relevant local validation after the fix. Do not implement another issue, do not merge, and stop if a protected product or architecture decision is required.
-"""
+def read_codex_result(path: Path) -> dict[str, Any]:
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise WorkerError(
+            "implementation_failed", f"Codex did not produce valid result JSON: {exc}", EXIT_IMPLEMENTATION_FAILED
+        ) from exc
+    status = payload.get("status")
+    if status not in {"success", "blocked", "failure"}:
+        raise WorkerError(
+            "implementation_failed", f"Codex result has invalid status: {status}", EXIT_IMPLEMENTATION_FAILED
+        )
+    return payload
 
 
 def run_codex(
@@ -341,8 +381,9 @@ def run_codex(
     attempt_name: str,
     env: dict[str, str],
     command_runner: Callable[..., CommandResult],
-) -> CommandResult:
+) -> CodexAttempt:
     output_path = layout.result_dir / f"codex-{attempt_name}.txt"
+    write_schema(output_path.with_suffix(".schema.json"))
     command = codex_command(output_path, env)
     result = command_runner(command, cwd=layout.worktree, input_text=prompt)
     transcript_path = layout.result_dir / f"codex-{attempt_name}-command-output.txt"
@@ -355,17 +396,33 @@ def run_codex(
             f"Codex attempt {attempt_name} failed with exit {result.returncode}",
             EXIT_IMPLEMENTATION_FAILED,
         )
-    return result
+    parsed = read_codex_result(output_path)
+    if parsed["status"] == "blocked":
+        raise WorkerError("blocked", parsed.get("summary", "Codex reported blocked"), EXIT_BLOCKED)
+    if parsed["status"] == "failure":
+        raise WorkerError(
+            "implementation_failed", parsed.get("summary", "Codex reported failure"), EXIT_IMPLEMENTATION_FAILED
+        )
+    return CodexAttempt(result, parsed)
 
 
 def validation_command(env: dict[str, str]) -> list[str]:
-    if env.get("CODEX_AGENT_VALIDATION_COMMAND"):
-        return shlex.split(env["CODEX_AGENT_VALIDATION_COMMAND"])
-    return ["bash", "tools/agent/local_validate.sh"]
+    del env
+    return ["bash", "tools/ci/verify.sh"]
 
 
 def run_validation(worktree: Path, env: dict[str, str], command_runner: Callable[..., CommandResult]) -> CommandResult:
     return command_runner(validation_command(env), cwd=worktree)
+
+
+def is_missing_local_godot(validation: CommandResult) -> bool:
+    output = validation.stdout + validation.stderr
+    return (
+        validation.returncode != 0
+        and "Godot is unavailable." in output
+        and "== godot ==" in output
+        and "== headless import ==" not in output
+    )
 
 
 def bounded_implementation_loop(
@@ -374,7 +431,7 @@ def bounded_implementation_loop(
     agents_text: str,
     env: dict[str, str],
     command_runner: Callable[..., CommandResult],
-) -> tuple[CommandResult, list[CommandResult]]:
+) -> tuple[CodexAttempt, ValidationSummary]:
     max_repairs = int(env.get("CODEX_AGENT_MAX_REPAIR_ATTEMPTS", str(DEFAULT_MAX_REPAIR_ATTEMPTS)))
     if max_repairs < 0 or max_repairs > 3:
         raise WorkerError("usage_error", "CODEX_AGENT_MAX_REPAIR_ATTEMPTS must be between 0 and 3", EXIT_USAGE)
@@ -388,7 +445,9 @@ def bounded_implementation_loop(
         validation_log = layout.result_dir / f"validation-{attempt + 1}.txt"
         validation_log.write_text(validation.stdout + validation.stderr, encoding="utf-8")
         if validation.returncode == 0:
-            return codex_result, validations
+            return codex_result, ValidationSummary("passed", validations)
+        if is_missing_local_godot(validation):
+            return codex_result, ValidationSummary("cloud_only_prerequisite_missing", validations)
         if attempt < max_repairs:
             codex_result = run_codex(
                 layout, repair_prompt(issue, validation), f"repair-{attempt + 1}", env, command_runner
@@ -426,9 +485,7 @@ def commit_and_push(
         "staging changes",
     )
     require_success(
-        command_runner(
-            [git, "commit", "-m", f"Implement issue #{issue.number} host-native runner path"], cwd=layout.worktree
-        ),
+        command_runner([git, "commit", "-m", f"Implement issue #{issue.number}: {issue.title}"], cwd=layout.worktree),
         "infrastructure_failed",
         EXIT_INFRASTRUCTURE_FAILED,
         "committing changes",
@@ -447,27 +504,27 @@ def load_pr_template(repo_root: Path) -> str:
 
 
 def pr_body(
-    issue: Issue, codex_result: CommandResult, validations: list[CommandResult], template: str, env: dict[str, str]
+    issue: Issue, codex_result: CodexAttempt, validation: ValidationSummary, template: str, env: dict[str, str]
 ) -> str:
     body = template
     commands = [
         f"tools/agent/run_issue.sh {issue.number}",
-        *[command_line(result.args) for result in validations],
+        *[command_line(result.args) for result in validation.attempts],
     ]
-    final_validation = validations[-1] if validations else None
-    test_results = (
-        "Local validation passed."
-        if final_validation and final_validation.returncode == 0
-        else "Local validation did not pass."
-    )
+    test_results = {
+        "passed": "Canonical verification passed locally.",
+        "cloud_only_prerequisite_missing": "Canonical verification ran locally and stopped at a missing device prerequisite; GitHub-hosted CI remains authoritative for pinned Godot execution.",
+    }.get(validation.status, "Canonical verification did not pass locally.")
     model = env.get("CODEX_AGENT_MODEL", "<host Codex default>")
     reasoning = env.get("CODEX_AGENT_REASONING", "<host Codex default>")
+    summary = str(codex_result.result.get("summary") or "").strip()
+    blockers = codex_result.result.get("blockers") or []
     replacements = {
         "Closes #<issue>": f"Closes #{issue.number}",
-        "## Scope Summary\n": "## Scope Summary\n\nImplemented by the repository-owned host-native Codex issue worker for the explicitly selected issue.\n",
+        "## Scope Summary\n": f"## Scope Summary\n\n{summary or 'Implemented the explicitly selected issue.'}\n",
         "```text\n```": "```text\n" + "\n".join(commands) + "\n```",
         "## Test Results\n": f"## Test Results\n\n{test_results} Validation logs are preserved under `.codex-agent/issue-{issue.number}/` in the runner worktree.\n",
-        "## Checks That Could Not Run\n": "## Checks That Could Not Run\n\nGitHub-hosted CI remains authoritative for pinned Godot provisioning and full `bash tools/ci/verify.sh` execution when Godot is not available on the laptop.\n",
+        "## Checks That Could Not Run\n": f"## Checks That Could Not Run\n\nLocal verification status: `{validation.status}`. GitHub-hosted CI remains authoritative for pinned Godot provisioning.\n",
         "## Risks and Decisions\n": f"## Risks and Decisions\n\nThe worker uses the existing host Codex installation with model `{model}` and reasoning `{reasoning}`. It never merges the PR.\n",
         "## Deferred Work\n": "## Deferred Work\n\nAutomatic CI-failure repair remains #53. Isolated container worker runtime remains #35/#51/#52. Additional runner trust hardening remains #36/#37.\n",
         "## Human Verification Steps\n": "\n## Human Verification Steps\n\nConfirm the GitHub-hosted `verify` check on this PR before merging.\n",
@@ -478,13 +535,12 @@ def pr_body(
         body = body.replace(
             "## Acceptance-Criteria Mapping\n\n- [ ]",
             "## Acceptance-Criteria Mapping\n\n"
-            "- [x] One explicitly selected issue was implemented through the host-native issue worker.\n"
-            "- [x] The deterministic issue branch and worktree were reused or created from `origin/main`.\n"
-            "- [x] Host Codex was invoked directly; Docker and the container Codex CLI were not used.\n"
-            "- [x] Local validation ran before publishing, with bounded repair available for failures.\n"
-            "- [x] Exactly one PR was created or reused; no merge was performed.\n\n"
+            "- [ ] Map the selected issue acceptance criteria during review; worker mechanics are recorded below as execution evidence, not issue acceptance evidence.\n\n"
             "## Codex Invocation Evidence\n\n```text\n"
-            f"{command_line(codex_result.args)}\n"
+            f"{command_line(codex_result.command.args)}\n"
+            "```\n\n"
+            "## Codex Result\n\n```json\n"
+            f"{json.dumps({'status': codex_result.result.get('status'), 'blockers': blockers}, indent=2, sort_keys=True)}\n"
             "```",
         )
     return body
@@ -657,9 +713,9 @@ def main(
         (layout.result_dir / "prompt.md").write_text(
             prompt_for_issue(issue, layout.worktree, agents_text), encoding="utf-8"
         )
-        codex_result, validations = bounded_implementation_loop(issue, layout, agents_text, env, command_runner)
+        codex_result, validation = bounded_implementation_loop(issue, layout, agents_text, env, command_runner)
         commit_and_push(issue, layout, env, command_runner)
-        body = pr_body(issue, codex_result, validations, load_pr_template(layout.worktree), env)
+        body = pr_body(issue, codex_result, validation, load_pr_template(layout.worktree), env)
         pr_url = open_or_update_pr(issue, layout, repo, body, env, command_runner)
         write_result(
             layout.result_path,
@@ -669,7 +725,8 @@ def main(
                 "branch": layout.branch,
                 "worktree": str(layout.worktree),
                 "pr": pr_url,
-                "validation_attempts": len(validations),
+                "validation_attempts": len(validation.attempts),
+                "validation_status": validation.status,
             },
         )
         return EXIT_SUCCESS
