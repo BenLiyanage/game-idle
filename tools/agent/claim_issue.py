@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+import contextlib
 import json
 import os
 import re
@@ -124,13 +125,9 @@ def open_in_progress_issues(
     return [int(item["number"]) for item in issues if int(item["number"]) != selected_issue]
 
 
-def preflight_lifecycle_labels(
-    repo: str, env: dict[str, str], command_runner: Callable[..., CommandResult]
-) -> None:
+def preflight_lifecycle_labels(repo: str, env: dict[str, str], command_runner: Callable[..., CommandResult]) -> None:
     result = require_success(
-        command_runner(
-            [gh_bin(env), "label", "list", "--repo", repo, "--limit", "100", "--json", "name"]
-        ),
+        command_runner([gh_bin(env), "label", "list", "--repo", repo, "--limit", "100", "--json", "name"]),
         "checking lifecycle labels",
     )
     try:
@@ -251,7 +248,7 @@ def claim_issue(
                     f"{exc.message}; failure reconciliation also failed: {recovery_exc.message}", exc.exit_code
                 ) from exc
             return {"claimed": False, "issue_number": issue_number, "reason": "claim_failed"}
-    try:
+    with contextlib.suppress(ClaimError):
         comment(
             issue_number,
             repo,
@@ -259,8 +256,6 @@ def claim_issue(
             env,
             command_runner,
         )
-    except ClaimError:
-        pass
     return {"claimed": True, "issue_number": issue_number, "reason": "claimed"}
 
 
