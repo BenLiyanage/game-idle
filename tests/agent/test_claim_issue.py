@@ -129,6 +129,36 @@ class ClaimIssueTests(unittest.TestCase):
         result = claim_issue.claim_issue(8, "BenLiyanage/game-idle", {}, PartialEdit())
         self.assertTrue(result["claimed"])
 
+    def test_mixed_lifecycle_state_reconciles_to_failed(self) -> None:
+        class MixedEdit(FakeClaimRunner):
+            def __call__(self, args: list[str], cwd: Path | None = None) -> claim_issue.CommandResult:
+                if args[:3] == ["gh", "issue", "edit"] and not any(
+                    call[:3] == ["gh", "issue", "edit"] for call in self.calls
+                ):
+                    self.issue_labels = [claim_issue.SELECTED_LABEL, claim_issue.IN_PROGRESS_LABEL]
+                    self.calls.append(args)
+                    return claim_issue.CommandResult(args, 0, "", "")
+                return super().__call__(args, cwd)
+
+        fake = MixedEdit()
+        result = claim_issue.claim_issue(8, "BenLiyanage/game-idle", {}, fake)
+        self.assertFalse(result["claimed"])
+        self.assertEqual(fake.issue_labels, [claim_issue.FAILED_LABEL])
+
+    def test_failed_reconciliation_reports_failure_but_converges(self) -> None:
+        class FailedEditTimeout(FakeClaimRunner):
+            def __call__(self, args: list[str], cwd: Path | None = None) -> claim_issue.CommandResult:
+                if args[:3] == ["gh", "issue", "edit"]:
+                    self.issue_labels = [claim_issue.FAILED_LABEL]
+                    self.calls.append(args)
+                    return claim_issue.CommandResult(args, 1, "", "request timed out")
+                return super().__call__(args, cwd)
+
+        fake = FailedEditTimeout()
+        result = claim_issue.claim_issue(8, "BenLiyanage/game-idle", {}, fake)
+        self.assertFalse(result["claimed"])
+        self.assertEqual(result["reason"], "claim_failed")
+
 
 if __name__ == "__main__":
     unittest.main()

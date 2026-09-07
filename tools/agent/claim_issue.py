@@ -202,6 +202,30 @@ def move_to_failed(
     )
 
 
+def reconcile_failed_state(
+    issue_number: int,
+    repo: str,
+    env: dict[str, str],
+    command_runner: Callable[..., CommandResult],
+    context: str,
+    original_error: ClaimError,
+) -> None:
+    try:
+        move_to_failed(issue_number, repo, env, command_runner)
+    except ClaimError as recovery_error:
+        observed = fetch_issue(issue_number, repo, env, command_runner)
+        if lifecycle_state(observed) == FAILED_LABEL:
+            return
+        raise ClaimError(
+            f"{context}; failure reconciliation also failed: {recovery_error.message}", original_error.exit_code
+        ) from original_error
+    observed = fetch_issue(issue_number, repo, env, command_runner)
+    if lifecycle_state(observed) != FAILED_LABEL:
+        raise ClaimError(
+            f"{context}; failed reconciliation did not converge", original_error.exit_code
+        ) from original_error
+
+
 def write_github_outputs(path: str | None, payload: dict[str, Any]) -> None:
     if not path:
         return
@@ -243,33 +267,12 @@ def claim_issue(
     except ClaimError as exc:
         observed = fetch_issue(issue_number, repo, env, command_runner)
         if lifecycle_state(observed) != IN_PROGRESS_LABEL:
-            try:
-                move_to_failed(issue_number, repo, env, command_runner)
-                observed = fetch_issue(issue_number, repo, env, command_runner)
-            except ClaimError as recovery_exc:
-                raise ClaimError(
-                    f"{exc.message}; failure reconciliation also failed: {recovery_exc.message}", exc.exit_code
-                ) from exc
-            if lifecycle_state(observed) != FAILED_LABEL:
-                raise ClaimError(
-                    f"{exc.message}; failure reconciliation did not reach failed lifecycle state", exc.exit_code
-                ) from exc
+            reconcile_failed_state(issue_number, repo, env, command_runner, exc.message, exc)
             return {"claimed": False, "issue_number": issue_number, "reason": "claim_failed"}
     observed = fetch_issue(issue_number, repo, env, command_runner)
     if lifecycle_state(observed) != IN_PROGRESS_LABEL:
-        try:
-            move_to_failed(issue_number, repo, env, command_runner)
-            observed = fetch_issue(issue_number, repo, env, command_runner)
-        except ClaimError as recovery_exc:
-            raise ClaimError(
-                f"claim transition was not authoritative; reconciliation failed: {recovery_exc.message}",
-                EXIT_INFRASTRUCTURE_FAILED,
-            ) from recovery_exc
-        if lifecycle_state(observed) != FAILED_LABEL:
-            raise ClaimError(
-                "claim transition was not authoritative; failed reconciliation did not converge",
-                EXIT_INFRASTRUCTURE_FAILED,
-            )
+        transition_error = ClaimError("claim transition was not authoritative", EXIT_INFRASTRUCTURE_FAILED)
+        reconcile_failed_state(issue_number, repo, env, command_runner, transition_error.message, transition_error)
         return {"claimed": False, "issue_number": issue_number, "reason": "claim_failed"}
     warning: str | None = None
     try:
