@@ -21,7 +21,7 @@ class FakeClaimRunner:
         self.issue_state = "OPEN"
         self.issue_labels = [claim_issue.SELECTED_LABEL]
         self.in_progress_issues: list[int] = []
-        self.lifecycle_labels = [claim_issue.SELECTED_LABEL, claim_issue.IN_PROGRESS_LABEL]
+        self.lifecycle_labels = [claim_issue.SELECTED_LABEL, claim_issue.IN_PROGRESS_LABEL, claim_issue.FAILED_LABEL]
 
     def __call__(self, args: list[str], cwd: Path | None = None) -> claim_issue.CommandResult:
         del cwd
@@ -79,7 +79,7 @@ class ClaimIssueTests(unittest.TestCase):
             claim_issue.claim_issue(8, "BenLiyanage/game-idle", {}, fake)
         self.assertFalse(any(call[:3] == ["gh", "issue", "edit"] for call in fake.calls))
 
-    def test_transition_failure_restores_selected_without_comment(self) -> None:
+    def test_ambiguous_transition_failure_reconciles_to_failed_without_comment(self) -> None:
         class FailingEdit(FakeClaimRunner):
             def __call__(self, args: list[str], cwd: Path | None = None) -> claim_issue.CommandResult:
                 if args[:3] == ["gh", "issue", "edit"] and "--add-label" in args:
@@ -90,11 +90,24 @@ class ClaimIssueTests(unittest.TestCase):
                 return super().__call__(args, cwd)
 
         fake = FailingEdit()
-        with self.assertRaises(claim_issue.ClaimError):
-            claim_issue.claim_issue(8, "BenLiyanage/game-idle", {}, fake)
+        result = claim_issue.claim_issue(8, "BenLiyanage/game-idle", {}, fake)
+        self.assertFalse(result["claimed"])
+        self.assertEqual(result["reason"], "claim_failed")
         edits = [call for call in fake.calls if call[:3] == ["gh", "issue", "edit"]]
         self.assertEqual(len(edits), 2)
         self.assertFalse(any(call[:3] == ["gh", "issue", "comment"] for call in fake.calls))
+
+    def test_comment_failure_does_not_unclaim_verified_transition(self) -> None:
+        class FailingComment(FakeClaimRunner):
+            def __call__(self, args: list[str], cwd: Path | None = None) -> claim_issue.CommandResult:
+                if args[:3] == ["gh", "issue", "comment"]:
+                    self.calls.append(args)
+                    return claim_issue.CommandResult(args, 1, "", "comment unavailable")
+                return super().__call__(args, cwd)
+
+        fake = FailingComment()
+        result = claim_issue.claim_issue(8, "BenLiyanage/game-idle", {}, fake)
+        self.assertTrue(result["claimed"])
 
 
 if __name__ == "__main__":

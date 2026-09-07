@@ -17,6 +17,7 @@ EXIT_INFRASTRUCTURE_FAILED = 40
 EXIT_USAGE = 64
 SELECTED_LABEL = "selected-for-development"
 IN_PROGRESS_LABEL = "in-progress"
+FAILED_LABEL = "failed"
 CLAIM_MARKER = "<!-- dev-engine-claim:v1 -->"
 
 
@@ -137,7 +138,7 @@ def preflight_lifecycle_labels(
     except json.JSONDecodeError as exc:
         raise ClaimError(f"gh returned invalid lifecycle label JSON: {exc}", EXIT_INFRASTRUCTURE_FAILED) from exc
     names = {item.get("name") for item in labels if isinstance(item, dict)}
-    missing = [label for label in (SELECTED_LABEL, IN_PROGRESS_LABEL) if label not in names]
+    missing = [label for label in (SELECTED_LABEL, IN_PROGRESS_LABEL, FAILED_LABEL) if label not in names]
     if missing:
         raise ClaimError(
             f"required lifecycle label configuration is missing: {', '.join(missing)}",
@@ -176,7 +177,7 @@ def move_to_in_progress(
     )
 
 
-def restore_selected(
+def move_to_failed(
     issue_number: int, repo: str, env: dict[str, str], command_runner: Callable[..., CommandResult]
 ) -> None:
     require_success(
@@ -189,12 +190,14 @@ def restore_selected(
                 "--repo",
                 repo,
                 "--remove-label",
+                SELECTED_LABEL,
+                "--remove-label",
                 IN_PROGRESS_LABEL,
                 "--add-label",
-                SELECTED_LABEL,
+                FAILED_LABEL,
             ]
         ),
-        f"restoring issue #{issue_number} to selected-for-development",
+        f"marking issue #{issue_number} as failed",
     )
 
 
@@ -237,18 +240,27 @@ def claim_issue(
     try:
         move_to_in_progress(issue_number, repo, env, command_runner)
     except ClaimError as exc:
-        try:
-            restore_selected(issue_number, repo, env, command_runner)
-        except ClaimError as restore_exc:
-            raise ClaimError(f"{exc.message}; recovery also failed: {restore_exc.message}", exc.exit_code) from exc
-        raise
-    comment(
-        issue_number,
-        repo,
-        f"{CLAIM_MARKER}Dev Engine claimed this issue for the supervised host-native runner.",
-        env,
-        command_runner,
-    )
+        observed = fetch_issue(issue_number, repo, env, command_runner)
+        if issue_has_label(observed, IN_PROGRESS_LABEL):
+            pass
+        else:
+            try:
+                move_to_failed(issue_number, repo, env, command_runner)
+            except ClaimError as recovery_exc:
+                raise ClaimError(
+                    f"{exc.message}; failure reconciliation also failed: {recovery_exc.message}", exc.exit_code
+                ) from exc
+            return {"claimed": False, "issue_number": issue_number, "reason": "claim_failed"}
+    try:
+        comment(
+            issue_number,
+            repo,
+            f"{CLAIM_MARKER}Dev Engine claimed this issue for the supervised host-native runner.",
+            env,
+            command_runner,
+        )
+    except ClaimError:
+        pass
     return {"claimed": True, "issue_number": issue_number, "reason": "claimed"}
 
 
