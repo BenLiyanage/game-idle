@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 import argparse
-import contextlib
 import json
 import os
 import re
@@ -95,6 +94,11 @@ def fetch_issue(
 def issue_has_label(issue: dict[str, Any], label: str) -> bool:
     labels = issue.get("labels", [])
     return any(item.get("name") == label for item in labels if isinstance(item, dict))
+
+
+def lifecycle_state(issue: dict[str, Any]) -> str | None:
+    states = [label for label in (SELECTED_LABEL, IN_PROGRESS_LABEL, FAILED_LABEL) if issue_has_label(issue, label)]
+    return states[0] if len(states) == 1 else None
 
 
 def open_in_progress_issues(
@@ -238,17 +242,37 @@ def claim_issue(
         move_to_in_progress(issue_number, repo, env, command_runner)
     except ClaimError as exc:
         observed = fetch_issue(issue_number, repo, env, command_runner)
-        if issue_has_label(observed, IN_PROGRESS_LABEL):
-            pass
-        else:
+        if lifecycle_state(observed) != IN_PROGRESS_LABEL:
             try:
                 move_to_failed(issue_number, repo, env, command_runner)
+                observed = fetch_issue(issue_number, repo, env, command_runner)
             except ClaimError as recovery_exc:
                 raise ClaimError(
                     f"{exc.message}; failure reconciliation also failed: {recovery_exc.message}", exc.exit_code
                 ) from exc
+            if lifecycle_state(observed) != FAILED_LABEL:
+                raise ClaimError(
+                    f"{exc.message}; failure reconciliation did not reach failed lifecycle state", exc.exit_code
+                ) from exc
             return {"claimed": False, "issue_number": issue_number, "reason": "claim_failed"}
-    with contextlib.suppress(ClaimError):
+    observed = fetch_issue(issue_number, repo, env, command_runner)
+    if lifecycle_state(observed) != IN_PROGRESS_LABEL:
+        try:
+            move_to_failed(issue_number, repo, env, command_runner)
+            observed = fetch_issue(issue_number, repo, env, command_runner)
+        except ClaimError as recovery_exc:
+            raise ClaimError(
+                f"claim transition was not authoritative; reconciliation failed: {recovery_exc.message}",
+                EXIT_INFRASTRUCTURE_FAILED,
+            ) from recovery_exc
+        if lifecycle_state(observed) != FAILED_LABEL:
+            raise ClaimError(
+                "claim transition was not authoritative; failed reconciliation did not converge",
+                EXIT_INFRASTRUCTURE_FAILED,
+            )
+        return {"claimed": False, "issue_number": issue_number, "reason": "claim_failed"}
+    warning: str | None = None
+    try:
         comment(
             issue_number,
             repo,
@@ -256,7 +280,12 @@ def claim_issue(
             env,
             command_runner,
         )
-    return {"claimed": True, "issue_number": issue_number, "reason": "claimed"}
+    except ClaimError as exc:
+        warning = exc.message
+    result: dict[str, Any] = {"claimed": True, "issue_number": issue_number, "reason": "claimed"}
+    if warning:
+        result["warning"] = warning
+    return result
 
 
 def main(
