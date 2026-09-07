@@ -123,6 +123,28 @@ def open_in_progress_issues(
     return [int(item["number"]) for item in issues if int(item["number"]) != selected_issue]
 
 
+def preflight_lifecycle_labels(
+    repo: str, env: dict[str, str], command_runner: Callable[..., CommandResult]
+) -> None:
+    result = require_success(
+        command_runner(
+            [gh_bin(env), "label", "list", "--repo", repo, "--limit", "100", "--json", "name"]
+        ),
+        "checking lifecycle labels",
+    )
+    try:
+        labels = json.loads(result.stdout)
+    except json.JSONDecodeError as exc:
+        raise ClaimError(f"gh returned invalid lifecycle label JSON: {exc}", EXIT_INFRASTRUCTURE_FAILED) from exc
+    names = {item.get("name") for item in labels if isinstance(item, dict)}
+    missing = [label for label in (SELECTED_LABEL, IN_PROGRESS_LABEL) if label not in names]
+    if missing:
+        raise ClaimError(
+            f"required lifecycle label configuration is missing: {', '.join(missing)}",
+            EXIT_INFRASTRUCTURE_FAILED,
+        )
+
+
 def comment(
     issue_number: int, repo: str, body: str, env: dict[str, str], command_runner: Callable[..., CommandResult]
 ) -> None:
@@ -154,12 +176,38 @@ def move_to_in_progress(
     )
 
 
+def restore_selected(
+    issue_number: int, repo: str, env: dict[str, str], command_runner: Callable[..., CommandResult]
+) -> None:
+    require_success(
+        command_runner(
+            [
+                gh_bin(env),
+                "issue",
+                "edit",
+                str(issue_number),
+                "--repo",
+                repo,
+                "--remove-label",
+                IN_PROGRESS_LABEL,
+                "--add-label",
+                SELECTED_LABEL,
+            ]
+        ),
+        f"restoring issue #{issue_number} to selected-for-development",
+    )
+
+
 def write_github_outputs(path: str | None, payload: dict[str, Any]) -> None:
     if not path:
         return
     with Path(path).open("a", encoding="utf-8") as handle:
         for key, value in payload.items():
-            handle.write(f"{key}={str(value).lower() if isinstance(value, bool) else value}\n")
+            rendered = str(value).lower() if isinstance(value, bool) else str(value)
+            if "\n" in rendered or "\r" in rendered:
+                handle.write(f"{key}<<DEV_ENGINE_OUTPUT\n{rendered}\nDEV_ENGINE_OUTPUT\n")
+            else:
+                handle.write(f"{key}={rendered}\n")
 
 
 def claim_issue(
@@ -170,6 +218,7 @@ def claim_issue(
         return {"claimed": False, "issue_number": issue_number, "reason": "issue_not_open"}
     if not issue_has_label(issue, SELECTED_LABEL):
         return {"claimed": False, "issue_number": issue_number, "reason": "selected_label_missing"}
+    preflight_lifecycle_labels(repo, env, command_runner)
     existing_wip = open_in_progress_issues(issue_number, repo, env, command_runner)
     if existing_wip:
         comment(
@@ -185,6 +234,14 @@ def claim_issue(
             "reason": "existing_wip",
             "existing_wip": existing_wip,
         }
+    try:
+        move_to_in_progress(issue_number, repo, env, command_runner)
+    except ClaimError as exc:
+        try:
+            restore_selected(issue_number, repo, env, command_runner)
+        except ClaimError as restore_exc:
+            raise ClaimError(f"{exc.message}; recovery also failed: {restore_exc.message}", exc.exit_code) from exc
+        raise
     comment(
         issue_number,
         repo,
@@ -192,7 +249,6 @@ def claim_issue(
         env,
         command_runner,
     )
-    move_to_in_progress(issue_number, repo, env, command_runner)
     return {"claimed": True, "issue_number": issue_number, "reason": "claimed"}
 
 
@@ -218,7 +274,10 @@ def main(
         return EXIT_SUCCESS
     except ClaimError as exc:
         payload = {"claimed": False, "issue_number": args.issue_number, "reason": "error", "message": exc.message}
-        write_github_outputs(args.github_output, payload)
+        write_github_outputs(
+            args.github_output,
+            {"claimed": payload["claimed"], "issue_number": payload["issue_number"], "reason": payload["reason"]},
+        )
         print(json.dumps(payload, sort_keys=True))
         return exc.exit_code
 
