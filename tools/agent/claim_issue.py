@@ -17,6 +17,7 @@ EXIT_INFRASTRUCTURE_FAILED = 40
 EXIT_USAGE = 64
 SELECTED_LABEL = "selected-for-development"
 IN_PROGRESS_LABEL = "in-progress"
+FAILED_LABEL = "failed"
 CLAIM_MARKER = "<!-- dev-engine-claim:v1 -->"
 
 
@@ -95,6 +96,11 @@ def issue_has_label(issue: dict[str, Any], label: str) -> bool:
     return any(item.get("name") == label for item in labels if isinstance(item, dict))
 
 
+def lifecycle_state(issue: dict[str, Any]) -> str | None:
+    states = [label for label in (SELECTED_LABEL, IN_PROGRESS_LABEL, FAILED_LABEL) if issue_has_label(issue, label)]
+    return states[0] if len(states) == 1 else None
+
+
 def open_in_progress_issues(
     selected_issue: int, repo: str, env: dict[str, str], command_runner: Callable[..., CommandResult]
 ) -> list[int]:
@@ -121,6 +127,24 @@ def open_in_progress_issues(
     except json.JSONDecodeError as exc:
         raise ClaimError(f"gh returned invalid issue list JSON: {exc}", EXIT_INFRASTRUCTURE_FAILED) from exc
     return [int(item["number"]) for item in issues if int(item["number"]) != selected_issue]
+
+
+def preflight_lifecycle_labels(repo: str, env: dict[str, str], command_runner: Callable[..., CommandResult]) -> None:
+    result = require_success(
+        command_runner([gh_bin(env), "label", "list", "--repo", repo, "--limit", "100", "--json", "name"]),
+        "checking lifecycle labels",
+    )
+    try:
+        labels = json.loads(result.stdout)
+    except json.JSONDecodeError as exc:
+        raise ClaimError(f"gh returned invalid lifecycle label JSON: {exc}", EXIT_INFRASTRUCTURE_FAILED) from exc
+    names = {item.get("name") for item in labels if isinstance(item, dict)}
+    missing = [label for label in (SELECTED_LABEL, IN_PROGRESS_LABEL, FAILED_LABEL) if label not in names]
+    if missing:
+        raise ClaimError(
+            f"required lifecycle label configuration is missing: {', '.join(missing)}",
+            EXIT_INFRASTRUCTURE_FAILED,
+        )
 
 
 def comment(
@@ -154,12 +178,64 @@ def move_to_in_progress(
     )
 
 
+def move_to_failed(
+    issue_number: int, repo: str, env: dict[str, str], command_runner: Callable[..., CommandResult]
+) -> None:
+    require_success(
+        command_runner(
+            [
+                gh_bin(env),
+                "issue",
+                "edit",
+                str(issue_number),
+                "--repo",
+                repo,
+                "--remove-label",
+                SELECTED_LABEL,
+                "--remove-label",
+                IN_PROGRESS_LABEL,
+                "--add-label",
+                FAILED_LABEL,
+            ]
+        ),
+        f"marking issue #{issue_number} as failed",
+    )
+
+
+def reconcile_failed_state(
+    issue_number: int,
+    repo: str,
+    env: dict[str, str],
+    command_runner: Callable[..., CommandResult],
+    context: str,
+    original_error: ClaimError,
+) -> None:
+    try:
+        move_to_failed(issue_number, repo, env, command_runner)
+    except ClaimError as recovery_error:
+        observed = fetch_issue(issue_number, repo, env, command_runner)
+        if lifecycle_state(observed) == FAILED_LABEL:
+            return
+        raise ClaimError(
+            f"{context}; failure reconciliation also failed: {recovery_error.message}", original_error.exit_code
+        ) from original_error
+    observed = fetch_issue(issue_number, repo, env, command_runner)
+    if lifecycle_state(observed) != FAILED_LABEL:
+        raise ClaimError(
+            f"{context}; failed reconciliation did not converge", original_error.exit_code
+        ) from original_error
+
+
 def write_github_outputs(path: str | None, payload: dict[str, Any]) -> None:
     if not path:
         return
     with Path(path).open("a", encoding="utf-8") as handle:
         for key, value in payload.items():
-            handle.write(f"{key}={str(value).lower() if isinstance(value, bool) else value}\n")
+            rendered = str(value).lower() if isinstance(value, bool) else str(value)
+            if "\n" in rendered or "\r" in rendered:
+                handle.write(f"{key}<<DEV_ENGINE_OUTPUT\n{rendered}\nDEV_ENGINE_OUTPUT\n")
+            else:
+                handle.write(f"{key}={rendered}\n")
 
 
 def claim_issue(
@@ -170,6 +246,7 @@ def claim_issue(
         return {"claimed": False, "issue_number": issue_number, "reason": "issue_not_open"}
     if not issue_has_label(issue, SELECTED_LABEL):
         return {"claimed": False, "issue_number": issue_number, "reason": "selected_label_missing"}
+    preflight_lifecycle_labels(repo, env, command_runner)
     existing_wip = open_in_progress_issues(issue_number, repo, env, command_runner)
     if existing_wip:
         comment(
@@ -185,15 +262,33 @@ def claim_issue(
             "reason": "existing_wip",
             "existing_wip": existing_wip,
         }
-    comment(
-        issue_number,
-        repo,
-        f"{CLAIM_MARKER}Dev Engine claimed this issue for the supervised host-native runner.",
-        env,
-        command_runner,
-    )
-    move_to_in_progress(issue_number, repo, env, command_runner)
-    return {"claimed": True, "issue_number": issue_number, "reason": "claimed"}
+    try:
+        move_to_in_progress(issue_number, repo, env, command_runner)
+    except ClaimError as exc:
+        observed = fetch_issue(issue_number, repo, env, command_runner)
+        if lifecycle_state(observed) != IN_PROGRESS_LABEL:
+            reconcile_failed_state(issue_number, repo, env, command_runner, exc.message, exc)
+            return {"claimed": False, "issue_number": issue_number, "reason": "claim_failed"}
+    observed = fetch_issue(issue_number, repo, env, command_runner)
+    if lifecycle_state(observed) != IN_PROGRESS_LABEL:
+        transition_error = ClaimError("claim transition was not authoritative", EXIT_INFRASTRUCTURE_FAILED)
+        reconcile_failed_state(issue_number, repo, env, command_runner, transition_error.message, transition_error)
+        return {"claimed": False, "issue_number": issue_number, "reason": "claim_failed"}
+    warning: str | None = None
+    try:
+        comment(
+            issue_number,
+            repo,
+            f"{CLAIM_MARKER}Dev Engine claimed this issue for the supervised host-native runner.",
+            env,
+            command_runner,
+        )
+    except ClaimError as exc:
+        warning = exc.message
+    result: dict[str, Any] = {"claimed": True, "issue_number": issue_number, "reason": "claimed"}
+    if warning:
+        result["warning"] = warning
+    return result
 
 
 def main(
@@ -218,7 +313,10 @@ def main(
         return EXIT_SUCCESS
     except ClaimError as exc:
         payload = {"claimed": False, "issue_number": args.issue_number, "reason": "error", "message": exc.message}
-        write_github_outputs(args.github_output, payload)
+        write_github_outputs(
+            args.github_output,
+            {"claimed": payload["claimed"], "issue_number": payload["issue_number"], "reason": payload["reason"]},
+        )
         print(json.dumps(payload, sort_keys=True))
         return exc.exit_code
 

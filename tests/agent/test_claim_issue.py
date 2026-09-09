@@ -21,6 +21,7 @@ class FakeClaimRunner:
         self.issue_state = "OPEN"
         self.issue_labels = [claim_issue.SELECTED_LABEL]
         self.in_progress_issues: list[int] = []
+        self.lifecycle_labels = [claim_issue.SELECTED_LABEL, claim_issue.IN_PROGRESS_LABEL, claim_issue.FAILED_LABEL]
 
     def __call__(self, args: list[str], cwd: Path | None = None) -> claim_issue.CommandResult:
         del cwd
@@ -35,7 +36,21 @@ class FakeClaimRunner:
         if args[:3] == ["gh", "issue", "list"]:
             payload = [{"number": number} for number in self.in_progress_issues]
             return claim_issue.CommandResult(args, 0, json.dumps(payload), "")
-        if args[:3] in (["gh", "issue", "comment"], ["gh", "issue", "edit"]):
+        if args[:3] == ["gh", "label", "list"]:
+            return claim_issue.CommandResult(
+                args,
+                0,
+                json.dumps([{"name": label} for label in self.lifecycle_labels]),
+                "",
+            )
+        if args[:3] == ["gh", "issue", "edit"]:
+            added_label = args[args.index("--add-label") + 1]
+            if added_label == claim_issue.IN_PROGRESS_LABEL:
+                self.issue_labels = [claim_issue.IN_PROGRESS_LABEL]
+            elif added_label == claim_issue.FAILED_LABEL:
+                self.issue_labels = [claim_issue.FAILED_LABEL]
+            return claim_issue.CommandResult(args, 0, "", "")
+        if args[:3] == ["gh", "issue", "comment"]:
             return claim_issue.CommandResult(args, 0, "", "")
         return claim_issue.CommandResult(args, 1, "", f"unexpected command: {args}")
 
@@ -63,6 +78,86 @@ class ClaimIssueTests(unittest.TestCase):
         self.assertFalse(result["claimed"])
         self.assertEqual(result["reason"], "selected_label_missing")
         self.assertEqual(len([call for call in fake.calls if call[:2] == ["gh", "issue"]]), 1)
+
+    def test_missing_in_progress_label_fails_before_issue_mutation(self) -> None:
+        fake = FakeClaimRunner()
+        fake.lifecycle_labels = [claim_issue.SELECTED_LABEL]
+        with self.assertRaisesRegex(claim_issue.ClaimError, "missing"):
+            claim_issue.claim_issue(8, "BenLiyanage/game-idle", {}, fake)
+        self.assertFalse(any(call[:3] == ["gh", "issue", "edit"] for call in fake.calls))
+
+    def test_ambiguous_transition_failure_reconciles_to_failed_without_comment(self) -> None:
+        class FailingEdit(FakeClaimRunner):
+            def __call__(self, args: list[str], cwd: Path | None = None) -> claim_issue.CommandResult:
+                if args[:3] == ["gh", "issue", "edit"] and "--add-label" in args:
+                    if len([call for call in self.calls if call[:3] == ["gh", "issue", "edit"]]) == 0:
+                        self.calls.append(args)
+                        return claim_issue.CommandResult(args, 1, "", "failed to update 1 issue\nretry later")
+                    return super().__call__(args, cwd)
+                return super().__call__(args, cwd)
+
+        fake = FailingEdit()
+        result = claim_issue.claim_issue(8, "BenLiyanage/game-idle", {}, fake)
+        self.assertFalse(result["claimed"])
+        self.assertEqual(result["reason"], "claim_failed")
+        edits = [call for call in fake.calls if call[:3] == ["gh", "issue", "edit"]]
+        self.assertEqual(len(edits), 2)
+        self.assertFalse(any(call[:3] == ["gh", "issue", "comment"] for call in fake.calls))
+
+    def test_comment_failure_does_not_unclaim_verified_transition(self) -> None:
+        class FailingComment(FakeClaimRunner):
+            def __call__(self, args: list[str], cwd: Path | None = None) -> claim_issue.CommandResult:
+                if args[:3] == ["gh", "issue", "comment"]:
+                    self.calls.append(args)
+                    return claim_issue.CommandResult(args, 1, "", "comment unavailable")
+                return super().__call__(args, cwd)
+
+        fake = FailingComment()
+        result = claim_issue.claim_issue(8, "BenLiyanage/game-idle", {}, fake)
+        self.assertTrue(result["claimed"])
+        self.assertIn("warning", result)
+
+    def test_reported_transition_failure_with_completed_postcondition_claims(self) -> None:
+        class PartialEdit(FakeClaimRunner):
+            def __call__(self, args: list[str], cwd: Path | None = None) -> claim_issue.CommandResult:
+                if args[:3] == ["gh", "issue", "edit"]:
+                    self.issue_labels = [claim_issue.IN_PROGRESS_LABEL]
+                    self.calls.append(args)
+                    return claim_issue.CommandResult(args, 1, "", "request timed out")
+                return super().__call__(args, cwd)
+
+        result = claim_issue.claim_issue(8, "BenLiyanage/game-idle", {}, PartialEdit())
+        self.assertTrue(result["claimed"])
+
+    def test_mixed_lifecycle_state_reconciles_to_failed(self) -> None:
+        class MixedEdit(FakeClaimRunner):
+            def __call__(self, args: list[str], cwd: Path | None = None) -> claim_issue.CommandResult:
+                if args[:3] == ["gh", "issue", "edit"] and not any(
+                    call[:3] == ["gh", "issue", "edit"] for call in self.calls
+                ):
+                    self.issue_labels = [claim_issue.SELECTED_LABEL, claim_issue.IN_PROGRESS_LABEL]
+                    self.calls.append(args)
+                    return claim_issue.CommandResult(args, 0, "", "")
+                return super().__call__(args, cwd)
+
+        fake = MixedEdit()
+        result = claim_issue.claim_issue(8, "BenLiyanage/game-idle", {}, fake)
+        self.assertFalse(result["claimed"])
+        self.assertEqual(fake.issue_labels, [claim_issue.FAILED_LABEL])
+
+    def test_failed_reconciliation_reports_failure_but_converges(self) -> None:
+        class FailedEditTimeout(FakeClaimRunner):
+            def __call__(self, args: list[str], cwd: Path | None = None) -> claim_issue.CommandResult:
+                if args[:3] == ["gh", "issue", "edit"]:
+                    self.issue_labels = [claim_issue.FAILED_LABEL]
+                    self.calls.append(args)
+                    return claim_issue.CommandResult(args, 1, "", "request timed out")
+                return super().__call__(args, cwd)
+
+        fake = FailedEditTimeout()
+        result = claim_issue.claim_issue(8, "BenLiyanage/game-idle", {}, fake)
+        self.assertFalse(result["claimed"])
+        self.assertEqual(result["reason"], "claim_failed")
 
 
 if __name__ == "__main__":
