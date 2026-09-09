@@ -330,19 +330,31 @@ def preflight_codex(env: dict[str, str], command_runner: Callable[..., CommandRe
             f"configured host Codex executable returned no version: {codex_bin}",
             EXIT_INFRASTRUCTURE_FAILED,
         )
+    require_success(
+        command_runner([*codex_exec_prefix(codex_bin, env), "--help"]),
+        "infrastructure_failed",
+        EXIT_INFRASTRUCTURE_FAILED,
+        f"validating configured host Codex exec argument contract {codex_bin}",
+    )
     return codex_bin, version
+
+
+def codex_exec_prefix(codex_bin: str, env: dict[str, str]) -> list[str]:
+    reject_deferred_codex_bin(codex_bin)
+    return [
+        codex_bin,
+        "--ask-for-approval",
+        env.get("CODEX_AGENT_APPROVAL_POLICY", DEFAULT_APPROVAL_POLICY),
+        "exec",
+        "--sandbox",
+        env.get("CODEX_AGENT_SANDBOX", DEFAULT_SANDBOX),
+    ]
 
 
 def codex_command(output_path: Path, env: dict[str, str]) -> list[str]:
     codex_bin = env.get("CODEX_AGENT_CODEX_BIN") or "codex"
-    reject_deferred_codex_bin(codex_bin)
     command = [
-        codex_bin,
-        "exec",
-        "--sandbox",
-        env.get("CODEX_AGENT_SANDBOX", DEFAULT_SANDBOX),
-        "--ask-for-approval",
-        env.get("CODEX_AGENT_APPROVAL_POLICY", DEFAULT_APPROVAL_POLICY),
+        *codex_exec_prefix(codex_bin, env),
         "--output-schema",
         str(output_path.with_suffix(".schema.json")),
         "--output-last-message",
