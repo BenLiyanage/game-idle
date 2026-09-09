@@ -63,7 +63,9 @@ class FakeRunner:
             return run_issue.CommandResult(args, 0, "", "")
         if args[:3] == ["git", "worktree", "add"]:
             return run_issue.CommandResult(args, 0, "", "")
-        if args[:2] == ["codex", "exec"]:
+        if args == [str(Path(sys.executable).resolve()), "--version"]:
+            return run_issue.CommandResult(args, 0, "codex-test 1.0\n", "")
+        if len(args) >= 2 and args[1] == "exec":
             output_path = Path(args[args.index("--output-last-message") + 1])
             output_path.parent.mkdir(parents=True, exist_ok=True)
             status = self.codex_statuses.pop(0)
@@ -93,6 +95,9 @@ class FakeRunner:
 
 
 class RunIssueTests(unittest.TestCase):
+    def worker_env(self, **values: str) -> dict[str, str]:
+        return {"CODEX_AGENT_CODEX_BIN": str(Path(sys.executable).resolve()), **values}
+
     def test_invalid_issue_input_fails_clearly(self) -> None:
         with self.assertRaises(run_issue.WorkerError) as context:
             run_issue.validate_issue_number("selected-for-development")
@@ -113,9 +118,9 @@ class RunIssueTests(unittest.TestCase):
         self.assertIn("Never merge", prompt)
         self.assertIn("Contract", prompt)
 
-    def test_dry_run_does_not_invoke_codex_or_mutate_github_or_docker(self) -> None:
+    def test_dry_run_only_preflights_codex_and_does_not_mutate_github_or_run_docker(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
-            env = {"CODEX_AGENT_RESULT_PATH": str(Path(tmp) / "result.json")}
+            env = self.worker_env(CODEX_AGENT_RESULT_PATH=str(Path(tmp) / "result.json"))
             fake = FakeRunner()
             with contextlib.redirect_stdout(io.StringIO()):
                 code = run_issue.main(["8", "--dry-run"], command_runner=fake, env=env)
@@ -125,7 +130,7 @@ class RunIssueTests(unittest.TestCase):
         self.assertNotIn("codex exec --sandbox", flattened)
         self.assertNotIn("docker run --rm", flattened)
         self.assertNotIn("gh pr create", flattened)
-        self.assertIn("codex exec", result["codex_command"])
+        self.assertIn(" exec ", result["codex_command"])
         self.assertEqual(result["validation_command"], "bash tools/ci/verify.sh")
 
     def test_existing_pr_is_reused(self) -> None:
@@ -154,11 +159,11 @@ class RunIssueTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             (root / "AGENTS.md").write_text("Contract", encoding="utf-8")
-            env = {
-                "CODEX_AGENT_WORKTREE_ROOT": str(root.parent),
-                "CODEX_AGENT_RESULT_DIR": str(root / ".codex-agent"),
-                "CODEX_AGENT_RESULT_PATH": str(root / ".codex-agent" / "result.json"),
-            }
+            env = self.worker_env(
+                CODEX_AGENT_WORKTREE_ROOT=str(root.parent),
+                CODEX_AGENT_RESULT_DIR=str(root / ".codex-agent"),
+                CODEX_AGENT_RESULT_PATH=str(root / ".codex-agent" / "result.json"),
+            )
             fake = FakeRunner()
             fake.worktree_porcelain = f"worktree {root}\nHEAD abc\nbranch refs/heads/agent/issue-8\n"
             fake.codex_statuses = ["success", "success"]
@@ -169,7 +174,7 @@ class RunIssueTests(unittest.TestCase):
             with contextlib.redirect_stdout(io.StringIO()):
                 code = run_issue.main(["8"], command_runner=fake, env=env)
         self.assertEqual(code, run_issue.EXIT_SUCCESS)
-        codex_calls = [call for call in fake.calls if call[:2] == ["codex", "exec"]]
+        codex_calls = [call for call in fake.calls if len(call) >= 2 and call[1] == "exec"]
         validation_calls = [call for call in fake.calls if call[:2] == ["bash", "tools/ci/verify.sh"]]
         self.assertEqual(len(codex_calls), 2)
         self.assertEqual(len(validation_calls), 2)
@@ -179,11 +184,11 @@ class RunIssueTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             (root / "AGENTS.md").write_text("Contract", encoding="utf-8")
-            env = {
-                "CODEX_AGENT_WORKTREE_ROOT": str(root.parent),
-                "CODEX_AGENT_RESULT_DIR": str(root / ".codex-agent"),
-                "CODEX_AGENT_RESULT_PATH": str(root / ".codex-agent" / "result.json"),
-            }
+            env = self.worker_env(
+                CODEX_AGENT_WORKTREE_ROOT=str(root.parent),
+                CODEX_AGENT_RESULT_DIR=str(root / ".codex-agent"),
+                CODEX_AGENT_RESULT_PATH=str(root / ".codex-agent" / "result.json"),
+            )
             fake = FakeRunner()
             fake.worktree_porcelain = f"worktree {root}\nHEAD abc\nbranch refs/heads/agent/issue-8\n"
             fake.codex_statuses = ["blocked"]
@@ -198,11 +203,11 @@ class RunIssueTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             (root / "AGENTS.md").write_text("Contract", encoding="utf-8")
-            env = {
-                "CODEX_AGENT_WORKTREE_ROOT": str(root.parent),
-                "CODEX_AGENT_RESULT_DIR": str(root / ".codex-agent"),
-                "CODEX_AGENT_RESULT_PATH": str(root / ".codex-agent" / "result.json"),
-            }
+            env = self.worker_env(
+                CODEX_AGENT_WORKTREE_ROOT=str(root.parent),
+                CODEX_AGENT_RESULT_DIR=str(root / ".codex-agent"),
+                CODEX_AGENT_RESULT_PATH=str(root / ".codex-agent" / "result.json"),
+            )
             fake = FakeRunner()
             fake.worktree_porcelain = f"worktree {root}\nHEAD abc\nbranch refs/heads/agent/issue-8\n"
             fake.validation_results = [
@@ -218,17 +223,17 @@ class RunIssueTests(unittest.TestCase):
             result = json.loads((root / ".codex-agent" / "result.json").read_text(encoding="utf-8"))
         self.assertEqual(code, run_issue.EXIT_SUCCESS)
         self.assertEqual(result["validation_status"], "cloud_only_prerequisite_missing")
-        self.assertEqual(len([call for call in fake.calls if call[:2] == ["codex", "exec"]]), 1)
+        self.assertEqual(len([call for call in fake.calls if len(call) >= 2 and call[1] == "exec"]), 1)
 
     def test_validation_failure_after_retry_has_distinct_exit_code(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             (root / "AGENTS.md").write_text("Contract", encoding="utf-8")
-            env = {
-                "CODEX_AGENT_WORKTREE_ROOT": str(root.parent),
-                "CODEX_AGENT_RESULT_DIR": str(root / ".codex-agent"),
-                "CODEX_AGENT_RESULT_PATH": str(root / ".codex-agent" / "result.json"),
-            }
+            env = self.worker_env(
+                CODEX_AGENT_WORKTREE_ROOT=str(root.parent),
+                CODEX_AGENT_RESULT_DIR=str(root / ".codex-agent"),
+                CODEX_AGENT_RESULT_PATH=str(root / ".codex-agent" / "result.json"),
+            )
             fake = FakeRunner()
             fake.worktree_porcelain = f"worktree {root}\nHEAD abc\nbranch refs/heads/agent/issue-8\n"
             fake.codex_statuses = ["success", "success"]
@@ -242,7 +247,7 @@ class RunIssueTests(unittest.TestCase):
 
     def test_worker_never_lists_or_selects_other_issues(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
-            env = {"CODEX_AGENT_RESULT_PATH": str(Path(tmp) / "result.json")}
+            env = self.worker_env(CODEX_AGENT_RESULT_PATH=str(Path(tmp) / "result.json"))
             fake = FakeRunner()
             with contextlib.redirect_stdout(io.StringIO()):
                 run_issue.main(["8", "--dry-run"], command_runner=fake, env=env)
@@ -255,6 +260,64 @@ class RunIssueTests(unittest.TestCase):
             run_issue.codex_command(
                 Path("/tmp/out.txt"), {"CODEX_AGENT_CODEX_BIN": "/workspace/node_modules/.bin/codex"}
             )
+
+    def test_preflight_resolves_and_invokes_configured_executable(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            result_path = Path(tmp) / "result.json"
+            fake = FakeRunner()
+            env = self.worker_env(CODEX_AGENT_RESULT_PATH=str(result_path))
+            with contextlib.redirect_stdout(io.StringIO()):
+                code = run_issue.main(["--preflight"], command_runner=fake, env=env)
+            result = json.loads(result_path.read_text(encoding="utf-8"))
+        self.assertEqual(code, run_issue.EXIT_SUCCESS)
+        self.assertEqual(result["status"], "preflight_ok")
+        self.assertEqual(result["codex_bin"], str(Path(sys.executable).resolve()))
+        self.assertIn([str(Path(sys.executable).resolve()), "--version"], fake.calls)
+
+    def test_missing_codex_is_bounded_infrastructure_failure(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            result_path = Path(tmp) / "result.json"
+            env = {
+                "CODEX_AGENT_CODEX_BIN": str(Path(tmp) / "missing-codex"),
+                "CODEX_AGENT_RESULT_PATH": str(result_path),
+            }
+            with contextlib.redirect_stdout(io.StringIO()):
+                code = run_issue.main(["--preflight"], env=env)
+            result = json.loads(result_path.read_text(encoding="utf-8"))
+        self.assertEqual(code, run_issue.EXIT_INFRASTRUCTURE_FAILED)
+        self.assertEqual(result["status"], "infrastructure_failed")
+        self.assertIn("cannot be resolved or executed", result["message"])
+
+    def test_empty_workflow_codex_configuration_fails_closed(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            result_path = Path(tmp) / "result.json"
+            env = {"CODEX_AGENT_CODEX_BIN": "", "CODEX_AGENT_RESULT_PATH": str(result_path)}
+            with contextlib.redirect_stdout(io.StringIO()):
+                code = run_issue.main(["--preflight"], env=env)
+            result = json.loads(result_path.read_text(encoding="utf-8"))
+        self.assertEqual(code, run_issue.EXIT_INFRASTRUCTURE_FAILED)
+        self.assertEqual(result["status"], "infrastructure_failed")
+        self.assertIn("configured but empty", result["message"])
+
+    def test_issue_run_fails_codex_preflight_before_issue_or_worktree_operations(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            result_path = Path(tmp) / "result.json"
+            env = {
+                "CODEX_AGENT_CODEX_BIN": str(Path(tmp) / "missing-codex"),
+                "CODEX_AGENT_RESULT_PATH": str(result_path),
+            }
+            fake = FakeRunner()
+            with contextlib.redirect_stdout(io.StringIO()):
+                code = run_issue.main(["8"], command_runner=fake, env=env)
+            result = json.loads(result_path.read_text(encoding="utf-8"))
+        self.assertEqual(code, run_issue.EXIT_INFRASTRUCTURE_FAILED)
+        self.assertEqual(result["status"], "infrastructure_failed")
+        self.assertEqual(fake.calls, [])
+
+    def test_missing_subprocess_is_returned_without_traceback(self) -> None:
+        result = run_issue.run_command(["/definitely/missing/game-idle-codex"])
+        self.assertEqual(result.returncode, 127)
+        self.assertIn("No such file or directory", result.stderr)
 
 
 if __name__ == "__main__":

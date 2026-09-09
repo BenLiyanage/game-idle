@@ -14,13 +14,16 @@ The active path is host-native. It does not invoke Docker, does not use the npm-
 ## Interface
 
 ```bash
+tools/agent/run_issue.sh --preflight
 tools/agent/run_issue.sh <issue-number>
 tools/agent/run_issue.sh <issue-number> --dry-run
 ```
 
 The issue number is mandatory and must be a positive integer. The worker never scans for another issue and never substitutes a different issue.
 
-Dry-run mode resolves issue metadata and reports the planned branch, worktree, Codex command, validation command, configured repair limit, and existing PR reuse state. It does not invoke Codex, push, create a PR, edit a PR, or change labels.
+Preflight mode resolves the configured host Codex executable to an absolute path and invokes `codex --version`. It does not resolve an issue, create a worktree, invoke Codex against product code, or mutate GitHub.
+
+Dry-run mode runs the executable preflight, resolves issue metadata, and reports the planned branch, worktree, Codex command, validation command, configured repair limit, and existing PR reuse state. It does not run Codex against product code, push, create a PR, edit a PR, or change labels.
 
 ## Branch And Worktree Convention
 
@@ -50,6 +53,10 @@ Optional environment variables:
 - `CODEX_AGENT_MAX_REPAIR_ATTEMPTS`: bounded local validation repair attempts, default `1`, maximum `3`.
 
 The worker rejects obvious npm/container Codex binary paths. The future isolated container runtime remains separate work.
+
+The trusted self-hosted workflow injects `CODEX_AGENT_CODEX_BIN` from the repository Actions variable with the same name. Configure that variable to the absolute path returned by `command -v codex` in the authenticated host Codex environment. This explicit job contract avoids depending on an interactive-shell PATH captured when the runner was registered. It identifies the existing executable only; Codex authentication remains in the existing host runtime and is not copied.
+
+Before resolving issue metadata or creating a worktree, the worker verifies that the configured path is executable and that `--version` succeeds. A missing, stale, or unexecutable path returns the bounded `infrastructure_failed` result and exit code `40`.
 
 ## Verification And Repair
 
@@ -117,11 +124,19 @@ Runner registration needs a short-lived GitHub runner registration token and mus
 3. Use a dedicated runner name such as `game-idle-dev-engine`.
 4. Add the dedicated label `dev-engine`.
 5. Install the service with GitHub's supported runner service command from that runner directory.
-6. Install pinned Godot locally or set `GODOT_BIN` so `bash tools/ci/verify.sh` is runnable on the laptop.
-7. Export or configure `DEV_ENGINE_RUNNER_DIR` and `DEV_ENGINE_RUNNER_NAME` for host Codex/Codex Remote.
-8. Verify:
+6. From the existing authenticated host Codex environment, resolve the executable and store its absolute path in the repository Actions variable:
 
 ```bash
+command -v codex
+gh variable set CODEX_AGENT_CODEX_BIN --repo BenLiyanage/game-idle --body "$(command -v codex)"
+```
+
+7. Install pinned Godot locally or set `GODOT_BIN` so `bash tools/ci/verify.sh` is runnable on the laptop.
+8. Export or configure `DEV_ENGINE_RUNNER_DIR` and `DEV_ENGINE_RUNNER_NAME` for host Codex/Codex Remote.
+9. Verify:
+
+```bash
+CODEX_AGENT_CODEX_BIN="$(command -v codex)" tools/agent/run_issue.sh --preflight
 tools/runner/dev_engine_runner.sh status
 tools/runner/dev_engine_runner.sh start
 tools/runner/dev_engine_runner.sh stop

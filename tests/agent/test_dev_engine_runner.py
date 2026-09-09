@@ -40,6 +40,8 @@ class DevEngineRunnerWorkflowTests(unittest.TestCase):
         self.assertIn("runs-on: [self-hosted, dev-engine]", self.workflow)
         self.assertIn("python3 tools/agent/claim_issue.py", self.workflow)
         self.assertIn('tools/agent/run_issue.sh "${{ needs.claim.outputs.issue-number }}"', self.workflow)
+        self.assertIn("CODEX_AGENT_CODEX_BIN: ${{ vars.CODEX_AGENT_CODEX_BIN }}", self.workflow)
+        self.assertIn("tools/agent/run_issue.sh --preflight", self.workflow)
 
     def test_workflow_uses_job_scoped_minimum_permissions(self) -> None:
         self.assertIn("permissions: {}", self.workflow)

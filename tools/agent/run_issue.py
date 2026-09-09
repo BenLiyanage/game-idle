@@ -6,6 +6,7 @@ import json
 import os
 import re
 import shlex
+import shutil
 import subprocess
 import sys
 from collections.abc import Callable, Iterable
@@ -88,14 +89,17 @@ class ValidationSummary:
 
 
 def run_command(args: list[str], cwd: Path | None = None, input_text: str | None = None) -> CommandResult:
-    completed = subprocess.run(
-        args,
-        cwd=str(cwd) if cwd else None,
-        input=input_text,
-        text=True,
-        capture_output=True,
-        check=False,
-    )
+    try:
+        completed = subprocess.run(
+            args,
+            cwd=str(cwd) if cwd else None,
+            input=input_text,
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+    except OSError as exc:
+        return CommandResult(args, 127, "", str(exc))
     return CommandResult(args, completed.returncode, completed.stdout, completed.stderr)
 
 
@@ -279,14 +283,59 @@ def ensure_worktree(layout: Layout, env: dict[str, str], command_runner: Callabl
     return layout.worktree
 
 
-def codex_command(output_path: Path, env: dict[str, str]) -> list[str]:
-    codex_bin = env.get("CODEX_AGENT_CODEX_BIN", "codex")
+def reject_deferred_codex_bin(codex_bin: str) -> None:
     if "node_modules/.bin/codex" in codex_bin or "/npm/" in codex_bin:
         raise WorkerError(
             "infrastructure_failed",
             "CODEX_AGENT_CODEX_BIN appears to reference an npm/container Codex CLI; use the host Codex installation",
             EXIT_INFRASTRUCTURE_FAILED,
         )
+
+
+def resolve_codex_executable(env: dict[str, str]) -> str:
+    configured = env.get("CODEX_AGENT_CODEX_BIN", "codex")
+    if not configured.strip():
+        raise WorkerError(
+            "infrastructure_failed",
+            "CODEX_AGENT_CODEX_BIN is configured but empty",
+            EXIT_INFRASTRUCTURE_FAILED,
+        )
+    reject_deferred_codex_bin(configured)
+    expanded = str(Path(configured).expanduser())
+    if os.sep in expanded:
+        resolved = str(Path(expanded).resolve())
+    else:
+        resolved = shutil.which(expanded, path=env.get("PATH")) or ""
+    if not resolved or not Path(resolved).is_file() or not os.access(resolved, os.X_OK):
+        raise WorkerError(
+            "infrastructure_failed",
+            f"configured host Codex executable cannot be resolved or executed: {configured}",
+            EXIT_INFRASTRUCTURE_FAILED,
+        )
+    return str(Path(resolved).resolve())
+
+
+def preflight_codex(env: dict[str, str], command_runner: Callable[..., CommandResult]) -> tuple[str, str]:
+    codex_bin = resolve_codex_executable(env)
+    result = require_success(
+        command_runner([codex_bin, "--version"]),
+        "infrastructure_failed",
+        EXIT_INFRASTRUCTURE_FAILED,
+        f"invoking configured host Codex executable {codex_bin}",
+    )
+    version = (result.stdout or result.stderr).strip()
+    if not version:
+        raise WorkerError(
+            "infrastructure_failed",
+            f"configured host Codex executable returned no version: {codex_bin}",
+            EXIT_INFRASTRUCTURE_FAILED,
+        )
+    return codex_bin, version
+
+
+def codex_command(output_path: Path, env: dict[str, str]) -> list[str]:
+    codex_bin = env.get("CODEX_AGENT_CODEX_BIN") or "codex"
+    reject_deferred_codex_bin(codex_bin)
     command = [
         codex_bin,
         "exec",
@@ -685,10 +734,34 @@ def main(
         action="store_true",
         help="resolve metadata and planned commands without invoking Codex or mutating GitHub",
     )
+    parser.add_argument(
+        "--preflight",
+        action="store_true",
+        help="resolve and invoke the configured host Codex executable without running an issue",
+    )
     args = parser.parse_args(argv)
     env = dict(os.environ if env is None else env)
     try:
+        if args.preflight:
+            if args.issue_number is not None or args.dry_run:
+                raise WorkerError(
+                    "usage_error",
+                    "usage: tools/agent/run_issue.sh --preflight",
+                    EXIT_USAGE,
+                )
+            codex_bin, codex_version = preflight_codex(env, command_runner)
+            result_path = Path(
+                env.get("CODEX_AGENT_RESULT_PATH", repo_root_from_script() / ".codex-agent" / "result.json")
+            )
+            write_result(
+                result_path,
+                {"status": "preflight_ok", "codex_bin": codex_bin, "codex_version": codex_version},
+            )
+            return EXIT_SUCCESS
+
         issue_number = validate_issue_number(args.issue_number)
+        codex_bin, _ = preflight_codex(env, command_runner)
+        env["CODEX_AGENT_CODEX_BIN"] = codex_bin
         repo_root = repo_root_from_script()
         layout = build_layout(repo_root, issue_number, env)
         repo = github_repo(repo_root, env, command_runner)
