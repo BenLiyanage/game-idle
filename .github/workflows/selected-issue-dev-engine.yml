@@ -45,6 +45,8 @@ jobs:
     if: needs.claim.outputs.claimed == 'true'
     runs-on: [self-hosted, dev-engine]
     timeout-minutes: 120
+    env:
+      CODEX_AGENT_CODEX_BIN: ${{ vars.CODEX_AGENT_CODEX_BIN }}
     permissions:
       contents: write
       issues: read
@@ -55,6 +57,10 @@ jobs:
         with:
           ref: main
           fetch-depth: 0
+
+      - name: Preflight configured host Codex
+        shell: bash
+        run: tools/agent/run_issue.sh --preflight
 
       - name: Run host-native Codex issue worker
         env:

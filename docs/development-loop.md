@@ -23,7 +23,7 @@ Only one lifecycle label should be present on an issue at a time. If the GitHub 
 3. The trusted default-branch `Selected Issue Dev Engine` workflow re-reads the issue state and enforces WIP=1 under a repository-wide concurrency group.
 4. The workflow moves the selected issue to `in-progress` and queues one laptop job for the repository-scoped self-hosted runner labeled `dev-engine`.
 5. Ben may start or stop the supervised runner window through `tools/runner/dev_engine_runner.sh start|stop|status` from the existing host Codex installation, including through Codex Remote.
-6. The laptop runner invokes `tools/agent/run_issue.sh <issue-number>`, which runs the existing authenticated host Codex installation in a deterministic issue worktree.
+6. The laptop runner preflights the absolute host Codex executable configured in the repository `CODEX_AGENT_CODEX_BIN` Actions variable, then invokes `tools/agent/run_issue.sh <issue-number>` in a deterministic issue worktree.
 7. Codex gets a bounded `bash tools/ci/verify.sh` feedback/fix opportunity before the worker commits, pushes, and creates or reuses one pull request.
 8. PR automation moves the issue from `in-progress` to `in-review`.
 9. CI runs `bash tools/ci/verify.sh`; automatic Codex review may supplement CI but does not replace it.
