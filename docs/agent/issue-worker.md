@@ -40,7 +40,7 @@ The worker fetches `origin/main` and creates new issue branches from current `or
 The worker invokes host Codex directly in the deterministic worktree:
 
 ```text
-codex exec --sandbox workspace-write --ask-for-approval never --output-last-message <artifact> -
+codex --ask-for-approval never exec --sandbox workspace-write --output-last-message <artifact> -
 ```
 
 Optional environment variables:
@@ -56,7 +56,7 @@ The worker rejects obvious npm/container Codex binary paths. The future isolated
 
 The trusted self-hosted workflow injects `CODEX_AGENT_CODEX_BIN` from the repository Actions variable with the same name. Configure that variable to the absolute path returned by `command -v codex` in the authenticated host Codex environment. This explicit job contract avoids depending on an interactive-shell PATH captured when the runner was registered. It identifies the existing executable only; Codex authentication remains in the existing host runtime and is not copied.
 
-Before resolving issue metadata or creating a worktree, the worker verifies that the configured path is executable and that `--version` succeeds. A missing, stale, or unexecutable path returns the bounded `infrastructure_failed` result and exit code `40`.
+Before resolving issue metadata or creating a worktree, the worker verifies that the configured path is executable, that `--version` succeeds, and that the installed CLI accepts the production approval/sandbox prefix via `codex --ask-for-approval <policy> exec --sandbox <mode> --help`. This parser check does not start an agent. A missing, stale, unexecutable, or incompatible CLI returns the bounded `infrastructure_failed` result and exit code `40`.
 
 ## Verification And Repair
 

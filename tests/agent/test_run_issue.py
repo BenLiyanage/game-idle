@@ -27,6 +27,7 @@ class FakeRunner:
         self.remote_branch_exists = False
         self.prs: list[dict[str, object]] = []
         self.codex_statuses: list[str] = ["success"]
+        self.codex_parser_compatible = True
         self.validation_results: list[run_issue.CommandResult] = [
             run_issue.CommandResult(["bash", "tools/ci/verify.sh"], 0, "verification ok", "")
         ]
@@ -65,7 +66,11 @@ class FakeRunner:
             return run_issue.CommandResult(args, 0, "", "")
         if args == [str(Path(sys.executable).resolve()), "--version"]:
             return run_issue.CommandResult(args, 0, "codex-test 1.0\n", "")
-        if len(args) >= 2 and args[1] == "exec":
+        if "exec" in args and args[-1] == "--help":
+            if self.codex_parser_compatible:
+                return run_issue.CommandResult(args, 0, "Run Codex non-interactively\n", "")
+            return run_issue.CommandResult(args, 2, "", "error: unexpected argument '--ask-for-approval' found")
+        if "exec" in args and "--output-last-message" in args:
             output_path = Path(args[args.index("--output-last-message") + 1])
             output_path.parent.mkdir(parents=True, exist_ok=True)
             status = self.codex_statuses.pop(0)
@@ -127,7 +132,7 @@ class RunIssueTests(unittest.TestCase):
             result = json.loads((Path(tmp) / "result.json").read_text(encoding="utf-8"))
         self.assertEqual(code, 0)
         flattened = [" ".join(call[:3]) for call in fake.calls]
-        self.assertNotIn("codex exec --sandbox", flattened)
+        self.assertFalse(any("--output-last-message" in call for call in fake.calls))
         self.assertNotIn("docker run --rm", flattened)
         self.assertNotIn("gh pr create", flattened)
         self.assertIn(" exec ", result["codex_command"])
@@ -174,7 +179,7 @@ class RunIssueTests(unittest.TestCase):
             with contextlib.redirect_stdout(io.StringIO()):
                 code = run_issue.main(["8"], command_runner=fake, env=env)
         self.assertEqual(code, run_issue.EXIT_SUCCESS)
-        codex_calls = [call for call in fake.calls if len(call) >= 2 and call[1] == "exec"]
+        codex_calls = [call for call in fake.calls if "--output-last-message" in call]
         validation_calls = [call for call in fake.calls if call[:2] == ["bash", "tools/ci/verify.sh"]]
         self.assertEqual(len(codex_calls), 2)
         self.assertEqual(len(validation_calls), 2)
@@ -223,7 +228,7 @@ class RunIssueTests(unittest.TestCase):
             result = json.loads((root / ".codex-agent" / "result.json").read_text(encoding="utf-8"))
         self.assertEqual(code, run_issue.EXIT_SUCCESS)
         self.assertEqual(result["validation_status"], "cloud_only_prerequisite_missing")
-        self.assertEqual(len([call for call in fake.calls if len(call) >= 2 and call[1] == "exec"]), 1)
+        self.assertEqual(len([call for call in fake.calls if "--output-last-message" in call]), 1)
 
     def test_validation_failure_after_retry_has_distinct_exit_code(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -261,6 +266,28 @@ class RunIssueTests(unittest.TestCase):
                 Path("/tmp/out.txt"), {"CODEX_AGENT_CODEX_BIN": "/workspace/node_modules/.bin/codex"}
             )
 
+    def test_codex_command_uses_cli_0153_global_approval_contract(self) -> None:
+        command = run_issue.codex_command(
+            Path("/tmp/out.txt"),
+            {
+                "CODEX_AGENT_CODEX_BIN": "/Applications/ChatGPT.app/Contents/Resources/codex",
+                "CODEX_AGENT_APPROVAL_POLICY": "never",
+                "CODEX_AGENT_SANDBOX": "workspace-write",
+            },
+        )
+        self.assertEqual(
+            command[:6],
+            [
+                "/Applications/ChatGPT.app/Contents/Resources/codex",
+                "--ask-for-approval",
+                "never",
+                "exec",
+                "--sandbox",
+                "workspace-write",
+            ],
+        )
+        self.assertLess(command.index("--ask-for-approval"), command.index("exec"))
+
     def test_preflight_resolves_and_invokes_configured_executable(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             result_path = Path(tmp) / "result.json"
@@ -273,6 +300,32 @@ class RunIssueTests(unittest.TestCase):
         self.assertEqual(result["status"], "preflight_ok")
         self.assertEqual(result["codex_bin"], str(Path(sys.executable).resolve()))
         self.assertIn([str(Path(sys.executable).resolve()), "--version"], fake.calls)
+        self.assertIn(
+            [
+                str(Path(sys.executable).resolve()),
+                "--ask-for-approval",
+                "never",
+                "exec",
+                "--sandbox",
+                "workspace-write",
+                "--help",
+            ],
+            fake.calls,
+        )
+
+    def test_incompatible_codex_parser_is_bounded_infrastructure_failure(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            result_path = Path(tmp) / "result.json"
+            fake = FakeRunner()
+            fake.codex_parser_compatible = False
+            env = self.worker_env(CODEX_AGENT_RESULT_PATH=str(result_path))
+            with contextlib.redirect_stdout(io.StringIO()):
+                code = run_issue.main(["--preflight"], command_runner=fake, env=env)
+            result = json.loads(result_path.read_text(encoding="utf-8"))
+        self.assertEqual(code, run_issue.EXIT_INFRASTRUCTURE_FAILED)
+        self.assertEqual(result["status"], "infrastructure_failed")
+        self.assertIn("exec argument contract", result["message"])
+        self.assertIn("unexpected argument '--ask-for-approval'", result["message"])
 
     def test_missing_codex_is_bounded_infrastructure_failure(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
