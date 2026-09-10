@@ -15,6 +15,12 @@ if [[ -z "$EXPECTED_RUFF_VERSION" ]]; then
   exit 1
 fi
 
+echo "== diff hygiene =="
+empty_tree="$(git hash-object -t tree /dev/null)"
+git diff --check "$empty_tree" HEAD --
+git diff --cached --check --
+git diff --check --
+
 echo "== structure =="
 bash tools/ci/check_repo_structure.sh
 
@@ -53,6 +59,10 @@ if [[ "$actual_version" != "$EXPECTED_GODOT_CLI_VERSION"* && "$actual_version" !
   echo "Expected Godot $EXPECTED_GODOT_VERSION, got: $actual_version" >&2
   exit 1
 fi
+
+echo "== gdscript policy =="
+python3 tools/ci/check_gdscript.py --godot-bin "$GODOT_BIN"
+python3 tools/ci/check_gdscript.py --godot-bin "$GODOT_BIN" --self-test
 
 echo "== headless import =="
 "$GODOT_BIN" --headless --quit --path .

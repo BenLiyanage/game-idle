@@ -17,6 +17,7 @@ required_paths=(
   "assets/ui"
   "docs/architecture.md"
   "docs/development-loop.md"
+  "docs/gdscript-policy.md"
   "export_presets.cfg"
   "project.godot"
   "scenes/main.tscn"
@@ -25,6 +26,7 @@ required_paths=(
   "tools/ci/check_repo_structure.sh"
   "tools/ci/bootstrap.py"
   "tools/ci/bootstrap.sh"
+  "tools/ci/check_gdscript.py"
   "tools/ci/verify.sh"
 )
 

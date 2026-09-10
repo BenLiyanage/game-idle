@@ -1,0 +1,4 @@
+extends RefCounted
+
+func consume_nothing(amount: int) -> void:
+	pass
