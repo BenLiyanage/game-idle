@@ -88,7 +88,12 @@ class ValidationSummary:
     attempts: list[CommandResult]
 
 
-def run_command(args: list[str], cwd: Path | None = None, input_text: str | None = None) -> CommandResult:
+def run_command(
+    args: list[str],
+    cwd: Path | None = None,
+    input_text: str | None = None,
+    process_env: dict[str, str] | None = None,
+) -> CommandResult:
     try:
         completed = subprocess.run(
             args,
@@ -97,6 +102,7 @@ def run_command(args: list[str], cwd: Path | None = None, input_text: str | None
             text=True,
             capture_output=True,
             check=False,
+            env=process_env,
         )
     except OSError as exc:
         return CommandResult(args, 127, "", str(exc))
@@ -283,6 +289,32 @@ def ensure_worktree(layout: Layout, env: dict[str, str], command_runner: Callabl
     return layout.worktree
 
 
+def bootstrap_worktree(
+    worktree: Path, env: dict[str, str], command_runner: Callable[..., CommandResult]
+) -> dict[str, str]:
+    result = require_success(
+        command_runner(["bash", "tools/ci/bootstrap.sh"], cwd=worktree),
+        "infrastructure_failed",
+        EXIT_INFRASTRUCTURE_FAILED,
+        f"bootstrapping repository toolchain in {worktree}",
+    )
+    try:
+        payload = json.loads(result.stdout)
+        bin_dir = str(payload["bin_dir"])
+        godot_bin = str(payload["godot_bin"])
+    except (json.JSONDecodeError, KeyError, TypeError) as exc:
+        raise WorkerError(
+            "infrastructure_failed",
+            f"repository bootstrap returned an invalid environment contract: {exc}",
+            EXIT_INFRASTRUCTURE_FAILED,
+        ) from exc
+    process_env = dict(env)
+    inherited_path = process_env.get("PATH", os.environ.get("PATH", ""))
+    process_env["PATH"] = os.pathsep.join(part for part in [bin_dir, inherited_path] if part)
+    process_env["GODOT_BIN"] = godot_bin
+    return process_env
+
+
 def reject_deferred_codex_bin(codex_bin: str) -> None:
     if "node_modules/.bin/codex" in codex_bin or "/npm/" in codex_bin:
         raise WorkerError(
@@ -446,7 +478,7 @@ def run_codex(
     output_path = layout.result_dir / f"codex-{attempt_name}.txt"
     write_schema(output_path.with_suffix(".schema.json"))
     command = codex_command(output_path, env)
-    result = command_runner(command, cwd=layout.worktree, input_text=prompt)
+    result = command_runner(command, cwd=layout.worktree, input_text=prompt, process_env=env)
     transcript_path = layout.result_dir / f"codex-{attempt_name}-command-output.txt"
     transcript_path.write_text(result.stdout + result.stderr, encoding="utf-8")
     if result.returncode == EXIT_CAPACITY:
@@ -473,7 +505,7 @@ def validation_command(env: dict[str, str]) -> list[str]:
 
 
 def run_validation(worktree: Path, env: dict[str, str], command_runner: Callable[..., CommandResult]) -> CommandResult:
-    return command_runner(validation_command(env), cwd=worktree)
+    return command_runner(validation_command(env), cwd=worktree, process_env=env)
 
 
 def is_missing_local_godot(validation: CommandResult) -> bool:
@@ -794,6 +826,7 @@ def main(
             layout.result_dir,
             layout.result_path,
         )
+        env = bootstrap_worktree(layout.worktree, env, command_runner)
         agents_text = (layout.worktree / "AGENTS.md").read_text(encoding="utf-8")
         (layout.result_dir / "prompt.md").write_text(
             prompt_for_issue(issue, layout.worktree, agents_text), encoding="utf-8"

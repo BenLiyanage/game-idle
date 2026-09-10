@@ -24,11 +24,12 @@ Only one lifecycle label should be present on an issue at a time. If the GitHub 
 4. The workflow moves the selected issue to `in-progress` and queues one laptop job for the repository-scoped self-hosted runner labeled `dev-engine`.
 5. Ben may start or stop the supervised runner window through `tools/runner/dev_engine_runner.sh start|stop|status` from the existing host Codex installation, including through Codex Remote.
 6. The laptop runner preflights the absolute host Codex executable configured in the repository `CODEX_AGENT_CODEX_BIN` Actions variable, then invokes `tools/agent/run_issue.sh <issue-number>` in a deterministic issue worktree.
-7. Codex gets a bounded `bash tools/ci/verify.sh` feedback/fix opportunity before the worker commits, pushes, and creates or reuses one pull request.
-8. PR automation moves the issue from `in-progress` to `in-review`.
-9. CI runs `bash tools/ci/verify.sh`; automatic Codex review may supplement CI but does not replace it.
-10. Ben reviews the PR and decides whether to merge.
-11. Merged work moves to `waiting-for-release` until release preparation is approved.
+7. The worker runs `bash tools/ci/bootstrap.sh` from that issue worktree. Bootstrap installs the repository-pinned toolchain under the shared Git common directory and passes its explicit environment contract to Codex and validation.
+8. Codex gets a bounded `bash tools/ci/verify.sh` feedback/fix opportunity before the worker commits, pushes, and creates or reuses one pull request.
+9. PR automation moves the issue from `in-progress` to `in-review`.
+10. CI runs repository bootstrap followed by `bash tools/ci/verify.sh`; automatic Codex review may supplement CI but does not replace it.
+11. Ben reviews the PR and decides whether to merge.
+12. Merged work moves to `waiting-for-release` until release preparation is approved.
 
 Deduplication markers:
 

@@ -5,24 +5,32 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "$ROOT_DIR"
 
 EXPECTED_GODOT_VERSION="$(tr -d '[:space:]' < .godot-version)"
+EXPECTED_GODOT_CLI_VERSION="${EXPECTED_GODOT_VERSION/-stable/.stable}"
+EXPECTED_RUFF_VERSION="$(sed -n 's/^[[:space:]]*ruff==\([^[:space:]#]*\).*$/\1/p' requirements-ruff.txt)"
+TOOL_ROOT="$(python3 tools/ci/bootstrap.py --print-tool-root)"
+RUFF_BIN="$TOOL_ROOT/bin/ruff"
+
+if [[ -z "$EXPECTED_RUFF_VERSION" ]]; then
+  echo "requirements-ruff.txt must contain a ruff==<version> pin" >&2
+  exit 1
+fi
 
 echo "== structure =="
 bash tools/ci/check_repo_structure.sh
 
 echo "== python quality =="
-if ! python3 -m ruff --version >/tmp/game-idle-ruff-version.txt 2>/tmp/game-idle-ruff-version.err; then
-  echo "Ruff is unavailable. Install the pinned repository tool with: python3 -m pip install -r requirements-ruff.txt" >&2
-  cat /tmp/game-idle-ruff-version.err >&2
+if [[ ! -x "$RUFF_BIN" ]]; then
+  echo "Pinned Ruff is unavailable. Run: bash tools/ci/bootstrap.sh" >&2
   exit 1
 fi
-ruff_version="$(cat /tmp/game-idle-ruff-version.txt)"
+ruff_version="$("$RUFF_BIN" --version)"
 echo "found: $ruff_version"
-if [[ "$ruff_version" != "ruff 0.16.6" ]]; then
-  echo "Expected Ruff 0.16.6. Install the pinned repository tool with: python3 -m pip install -r requirements-ruff.txt" >&2
+if [[ "$ruff_version" != "ruff $EXPECTED_RUFF_VERSION" ]]; then
+  echo "Expected Ruff $EXPECTED_RUFF_VERSION. Run: bash tools/ci/bootstrap.sh" >&2
   exit 1
 fi
-python3 -m ruff check .
-python3 -m ruff format --check .
+"$RUFF_BIN" check .
+"$RUFF_BIN" format --check .
 python3 -m unittest discover
 
 echo "== godot =="
@@ -32,15 +40,16 @@ if [[ -n "${GODOT_BIN:-}" ]]; then
     exit 1
   fi
 else
-  if ! GODOT_BIN="$(command -v godot)"; then
-    echo "Godot is unavailable. Install Godot $EXPECTED_GODOT_VERSION or set GODOT_BIN." >&2
+  GODOT_BIN="$TOOL_ROOT/bin/godot"
+  if [[ ! -x "$GODOT_BIN" ]]; then
+    echo "Pinned Godot is unavailable. Run: bash tools/ci/bootstrap.sh" >&2
     exit 1
   fi
 fi
 
 actual_version="$("$GODOT_BIN" --version)"
 echo "found: $actual_version"
-if [[ "$actual_version" != 4.7.2.stable* && "$actual_version" != 4.7.2-stable* ]]; then
+if [[ "$actual_version" != "$EXPECTED_GODOT_CLI_VERSION"* && "$actual_version" != "$EXPECTED_GODOT_VERSION"* ]]; then
   echo "Expected Godot $EXPECTED_GODOT_VERSION, got: $actual_version" >&2
   exit 1
 fi

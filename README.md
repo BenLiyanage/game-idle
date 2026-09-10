@@ -33,7 +33,15 @@ In Godot:
 
 GitHub Actions runs on pushes and pull requests to `main`:
 
+- Runs `bash tools/ci/bootstrap.sh` to prepare the versions pinned by `.godot-version` and
+  `requirements-ruff.txt`.
 - Runs `bash tools/ci/verify.sh` as the canonical verification command.
-- Downloads the pinned Linux Godot 4.7.2-stable binary in CI before verification.
+- Keeps bootstrap and verification separate so environment failures are distinguishable from code failures.
+
+Bootstrap supports GitHub-hosted Linux x86_64 and macOS arm64/x86_64. It installs tools under
+`$(git rev-parse --git-common-dir)/game-idle-tools`, so one checkout and its `agent/issue-N` worktrees share the
+same idempotent toolchain without adding generated files to Git status. The bootstrap command prints a JSON
+environment contract; direct tool users can prepend its `bin_dir` to `PATH`, while `verify.sh` resolves the shared
+location itself.
 
 See: `.github/workflows/ci.yml`
