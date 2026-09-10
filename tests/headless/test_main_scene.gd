@@ -13,28 +13,28 @@ func _run() -> int:
 	if not (scene is PackedScene):
 		return _fail("%s did not load as PackedScene" % MAIN_SCENE_PATH)
 
-	var root := (scene as PackedScene).instantiate()
-	if root == null:
+	var scene_root := (scene as PackedScene).instantiate()
+	if scene_root == null:
 		return _fail("failed to instantiate %s" % MAIN_SCENE_PATH)
 
-	var center_container := root.get_node_or_null("CenterContainer")
+	var center_container := scene_root.get_node_or_null("CenterContainer")
 	if center_container == null:
-		root.free()
+		scene_root.free()
 		return _fail("missing CenterContainer")
 
 	var label := center_container.get_node_or_null("Label")
 	if label == null:
-		root.free()
+		scene_root.free()
 		return _fail("missing CenterContainer/Label")
 	if not label is Label:
-		root.free()
+		scene_root.free()
 		return _fail("CenterContainer/Label is not a Label")
 	if (label as Label).text != "Hello Idle":
 		var actual_text := (label as Label).text
-		root.free()
+		scene_root.free()
 		return _fail("expected Label text 'Hello Idle', got '%s'" % actual_text)
 
-	root.free()
+	scene_root.free()
 	print("scene smoke test ok")
 	return 0
 

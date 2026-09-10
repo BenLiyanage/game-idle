@@ -1,0 +1,6 @@
+extends RefCounted
+
+var value
+
+func read_value():
+	return value

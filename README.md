@@ -37,6 +37,7 @@ GitHub Actions runs on pushes and pull requests to `main`:
   `requirements-ruff.txt`.
 - Runs `bash tools/ci/verify.sh` as the canonical verification command.
 - Keeps bootstrap and verification separate so environment failures are distinguishable from code failures.
+- Enforces the repository's [typed GDScript and warning policy](docs/gdscript-policy.md) with pinned Godot.
 
 Bootstrap supports GitHub-hosted Linux x86_64 and macOS arm64/x86_64. It installs tools under
 `$(git rev-parse --git-common-dir)/game-idle-tools`, so one checkout and its `agent/issue-N` worktrees share the

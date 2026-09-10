@@ -7,8 +7,9 @@ func _ready() -> void:
 	print("[game-idle] snapshot: press F12 to save a PNG to user://snapshots")
 
 func _unhandled_input(event: InputEvent) -> void:
-	if event is InputEventKey and event.pressed and not event.echo:
-		if event.keycode == KEY_F12:
+	if event is InputEventKey:
+		var key_event: InputEventKey = event
+		if key_event.pressed and not key_event.echo and key_event.keycode == KEY_F12:
 			_take_snapshot()
 
 func _take_snapshot() -> void:
