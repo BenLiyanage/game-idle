@@ -23,6 +23,8 @@ required_paths=(
   "scripts/main.gd"
   "tests/headless/test_main_scene.gd"
   "tools/ci/check_repo_structure.sh"
+  "tools/ci/bootstrap.py"
+  "tools/ci/bootstrap.sh"
   "tools/ci/verify.sh"
 )
 

@@ -22,6 +22,7 @@ class FakeRunner:
     def __init__(self) -> None:
         self.calls: list[list[str]] = []
         self.inputs: list[str | None] = []
+        self.process_envs: list[dict[str, str] | None] = []
         self.worktree_porcelain = ""
         self.branch_exists = False
         self.remote_branch_exists = False
@@ -34,10 +35,15 @@ class FakeRunner:
         self.status_output = " M README.md\n"
 
     def __call__(
-        self, args: list[str], cwd: Path | None = None, input_text: str | None = None
+        self,
+        args: list[str],
+        cwd: Path | None = None,
+        input_text: str | None = None,
+        process_env: dict[str, str] | None = None,
     ) -> run_issue.CommandResult:
         self.calls.append(args)
         self.inputs.append(input_text)
+        self.process_envs.append(process_env)
         if args[:3] == ["git", "config", "--get"]:
             return run_issue.CommandResult(args, 0, "https://github.com/BenLiyanage/game-idle.git\n", "")
         if args[:3] == ["gh", "issue", "view"]:
@@ -64,6 +70,12 @@ class FakeRunner:
             return run_issue.CommandResult(args, 0, "", "")
         if args[:3] == ["git", "worktree", "add"]:
             return run_issue.CommandResult(args, 0, "", "")
+        if args == ["bash", "tools/ci/bootstrap.sh"]:
+            payload = {
+                "bin_dir": "/tmp/game-idle-tools/bin",
+                "godot_bin": "/tmp/game-idle-tools/bin/godot",
+            }
+            return run_issue.CommandResult(args, 0, json.dumps(payload), "")
         if args == [str(Path(sys.executable).resolve()), "--version"]:
             return run_issue.CommandResult(args, 0, "codex-test 1.0\n", "")
         if "exec" in args and args[-1] == "--help":
@@ -184,6 +196,63 @@ class RunIssueTests(unittest.TestCase):
         self.assertEqual(len(codex_calls), 2)
         self.assertEqual(len(validation_calls), 2)
         self.assertIn("local validation command for issue #8 failed", "\n".join(text or "" for text in fake.inputs))
+
+    def test_actual_issue_worktree_is_bootstrapped_before_codex_and_validation(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "AGENTS.md").write_text("Contract", encoding="utf-8")
+            env = self.worker_env(
+                CODEX_AGENT_WORKTREE_ROOT=str(root.parent),
+                CODEX_AGENT_RESULT_DIR=str(root / ".codex-agent"),
+                CODEX_AGENT_RESULT_PATH=str(root / ".codex-agent" / "result.json"),
+                PATH="/host/bin",
+            )
+            fake = FakeRunner()
+            fake.worktree_porcelain = f"worktree {root}\nHEAD abc\nbranch refs/heads/agent/issue-8\n"
+            with contextlib.redirect_stdout(io.StringIO()):
+                code = run_issue.main(["8"], command_runner=fake, env=env)
+        self.assertEqual(code, run_issue.EXIT_SUCCESS)
+        bootstrap_index = fake.calls.index(["bash", "tools/ci/bootstrap.sh"])
+        codex_index = next(index for index, call in enumerate(fake.calls) if "--output-last-message" in call)
+        validation_index = fake.calls.index(["bash", "tools/ci/verify.sh"])
+        self.assertLess(bootstrap_index, codex_index)
+        self.assertLess(bootstrap_index, validation_index)
+        self.assertEqual(fake.process_envs[codex_index]["GODOT_BIN"], "/tmp/game-idle-tools/bin/godot")
+        self.assertEqual(fake.process_envs[codex_index]["PATH"], "/tmp/game-idle-tools/bin:/host/bin")
+
+    def test_bootstrap_failure_is_distinct_and_codex_does_not_run(self) -> None:
+        class FailingBootstrapRunner(FakeRunner):
+            def __call__(
+                self,
+                args: list[str],
+                cwd: Path | None = None,
+                input_text: str | None = None,
+                process_env: dict[str, str] | None = None,
+            ) -> run_issue.CommandResult:
+                if args == ["bash", "tools/ci/bootstrap.sh"]:
+                    self.calls.append(args)
+                    self.inputs.append(input_text)
+                    self.process_envs.append(process_env)
+                    return run_issue.CommandResult(args, 1, "", "unsupported bootstrap platform")
+                return super().__call__(args, cwd, input_text, process_env)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "AGENTS.md").write_text("Contract", encoding="utf-8")
+            env = self.worker_env(
+                CODEX_AGENT_WORKTREE_ROOT=str(root.parent),
+                CODEX_AGENT_RESULT_DIR=str(root / ".codex-agent"),
+                CODEX_AGENT_RESULT_PATH=str(root / ".codex-agent" / "result.json"),
+            )
+            fake = FailingBootstrapRunner()
+            fake.worktree_porcelain = f"worktree {root}\nHEAD abc\nbranch refs/heads/agent/issue-8\n"
+            with contextlib.redirect_stdout(io.StringIO()):
+                code = run_issue.main(["8"], command_runner=fake, env=env)
+            result = json.loads((root / ".codex-agent" / "result.json").read_text(encoding="utf-8"))
+        self.assertEqual(code, run_issue.EXIT_INFRASTRUCTURE_FAILED)
+        self.assertEqual(result["status"], "infrastructure_failed")
+        self.assertIn("bootstrapping repository toolchain", result["message"])
+        self.assertFalse(any("--output-last-message" in call for call in fake.calls))
 
     def test_blocked_codex_result_has_distinct_exit_code(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

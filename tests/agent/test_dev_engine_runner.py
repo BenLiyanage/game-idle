@@ -43,6 +43,15 @@ class DevEngineRunnerWorkflowTests(unittest.TestCase):
         self.assertIn("CODEX_AGENT_CODEX_BIN: ${{ vars.CODEX_AGENT_CODEX_BIN }}", self.workflow)
         self.assertIn("tools/agent/run_issue.sh --preflight", self.workflow)
 
+    def test_hosted_ci_delegates_bootstrap_and_verification_to_repository_scripts(self) -> None:
+        ci_workflow = (ROOT / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
+        bootstrap_index = ci_workflow.index("bash tools/ci/bootstrap.sh")
+        verify_index = ci_workflow.index("bash tools/ci/verify.sh")
+        self.assertLess(bootstrap_index, verify_index)
+        self.assertNotIn("pip install", ci_workflow)
+        self.assertNotIn("godotengine/godot-builds", ci_workflow)
+        self.assertIn("name: verify", ci_workflow)
+
     def test_workflow_uses_job_scoped_minimum_permissions(self) -> None:
         self.assertIn("permissions: {}", self.workflow)
         self.assertIn("permissions:\n      contents: read\n      issues: write", self.workflow)
