@@ -2,6 +2,10 @@
 
 The goal of this repository is to ship the smallest viable mobile idle game quickly.
 
+The canonical v1 product intent and first-playable rubric are in
+[`docs/product.md`](docs/product.md). Gameplay implementation and review must use that
+contract to decide what belongs in v1. Material changes to it require human approval.
+
 GitHub issues are the canonical implementation specifications. Implement only an issue that is explicitly selected for development. Preserve the issue's scope and acceptance criteria.
 
 Work rules:

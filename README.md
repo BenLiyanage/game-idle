@@ -2,6 +2,10 @@
 
 Phase 1 bootstrap for a minimal Godot 4.7.2-stable project.
 
+## Product direction
+
+See [`docs/product.md`](docs/product.md) for the canonical v1 product contract, first-playable boundaries, and human playtest criteria.
+
 ## What this is
 
 - A barebones Godot 4.7.2-stable project that boots to a single responsive UI screen showing **“Hello Idle”**.
